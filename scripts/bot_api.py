@@ -5,6 +5,7 @@ Bot HTTP API Server
 """
 
 from fastapi import FastAPI, UploadFile, File
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import json
 import os
@@ -16,6 +17,14 @@ import speech_recognition as sr
 from pydub import AudioSegment
 
 app = FastAPI()
+
+# 允许跨域
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 QUEUE_DIR = os.path.expanduser("~/data/tts-tg-bot/queue")
 os.makedirs(QUEUE_DIR, exist_ok=True)
@@ -62,6 +71,56 @@ def get_messages():
                 pass
     
     return {'messages': messages}
+
+@app.post('/open_window')
+async def open_window(data: dict):
+    """打开浏览器窗口"""
+    url = data.get('url', '')
+    try:
+        import subprocess
+        subprocess.run(['open', url], check=True)
+        return {'success': True, 'url': url}
+    except Exception as e:
+        return {'success': False, 'error': str(e)}
+
+@app.post('/process')
+async def process_text(data: dict):
+    """处理文字并发送到 AI Studio"""
+    text = data.get('text', '')
+    
+    try:
+        import subprocess
+        import json
+        
+        # 输入文字到 AI Studio
+        selector = 'body > app-root > ms-app > div > div > div > div > span > ms-console-component > ms-console-embed > div.root > div > div.console-left-panel.visible > ms-code-assistant-chat > div > div.bottom-container > div.input-container > textarea'
+        
+        # 设置文本
+        result = subprocess.run([
+            'curl-rpc', 'exec_js',
+            'win_id=1',
+            f'code=document.querySelector("{selector}").value = "{text}"'
+        ], capture_output=True, text=True)
+        
+        # 触发输入事件
+        subprocess.run([
+            'curl-rpc', 'exec_js',
+            'win_id=1',
+            f'code=document.querySelector("{selector}").dispatchEvent(new Event("input", {{bubbles: true}}))'
+        ], capture_output=True, text=True)
+        
+        # 点击发送按钮
+        btn_selector = 'body > app-root > ms-app > div > div > div > div > span > ms-console-component > ms-console-embed > div.root > div > div.console-left-panel.visible > ms-code-assistant-chat > div > div.bottom-container > div.input-container > div > div > button.mat-mdc-tooltip-trigger.send-button.ms-button-icon.ms-button-primary.ng-star-inserted'
+        
+        subprocess.run([
+            'curl-rpc', 'exec_js',
+            'win_id=1',
+            f'code=document.querySelector("{btn_selector}").click()'
+        ], capture_output=True, text=True)
+        
+        return {'text': text, 'reply': f'已发送到 AI Studio: {text}', 'success': True}
+    except Exception as e:
+        return {'text': text, 'reply': f'错误: {str(e)}', 'success': False}
 
 @app.post('/voice_to_text')
 async def voice_to_text(file: UploadFile = File(...)):
