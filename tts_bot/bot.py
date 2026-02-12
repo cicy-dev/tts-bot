@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Telegram TTS Bot - 文字转语音机器人
-支持双队列、ACK 机制、tmux 管理命令
+支持双队列、ACK 机制、t1mux 管理命令
 """
 
 import os

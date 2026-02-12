@@ -11,7 +11,7 @@ from typing import Optional, List
 
 CONFIG_PATH = os.path.expanduser("~/.tts-bot/config.json")
 
-
+ac
 class Config:
     """TTS Bot 配置类"""
 
