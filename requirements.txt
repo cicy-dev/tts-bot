@@ -6,3 +6,5 @@ ffmpeg-python
 fastapi
 uvicorn
 python-multipart
+redis
+watchdog

@@ -177,49 +177,38 @@ async def voice_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def create_a_queue_file(
     text: str, user_id: int, chat_id: int, message_id: int, is_text: bool = False
 ) -> str:
-    """创建 A 队列文件"""
-    timestamp = int(time.time())
-    queue_file = os.path.join(QUEUE_DIR, f"msg_{timestamp}_{message_id}_A.json")
+    """创建队列消息（Redis）"""
+    from .redis_queue import rq
+    import time as _time
 
+    msg_id = f"msg_{int(_time.time())}_{message_id}"
     data = {
-        "timestamp": timestamp,
         "message_id": message_id,
         "chat_id": chat_id,
         "user_id": user_id,
         "text": text,
         "is_text": is_text,
-        "status": "pending",
-        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
-
-    with open(queue_file, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False)
-
-    return queue_file
+    rq.push(msg_id, data)
+    return msg_id
 
 
 async def update_a_queue_status(
-    queue_file: str, status: str, ack_message_id: int = None
+    queue_id: str, status: str, ack_message_id: int = None
 ):
-    """更新 A 队列状态"""
-    try:
-        with open(queue_file, "r", encoding="utf-8") as f:
-            data = json.load(f)
+    """更新队列状态（Redis）"""
+    from .redis_queue import rq
 
+    data = rq.get(queue_id)
+    if data:
         data["status"] = status
-        data["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         if ack_message_id:
             data["ack_message_id"] = ack_message_id
-
-        with open(queue_file, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False)
-    except Exception as e:
-        logger.error(f"更新队列状态失败: {e}")
+        rq.update(queue_id, data)
 
 
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理文字消息"""
+    """处理文字消息 - 直接发送到 tmux，不检查 thinking"""
     text = update.message.text
     user_id = update.effective_user.id
 
@@ -244,37 +233,19 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     logger.info(f"收到文字消息: user_id={user_id}, text='{text[:100]}...'")
 
-    # 获取用户语音设置
-    voice = user_voices.get(user_id, VOICES["中文女声"])
-    logger.debug(f"使用语音: {voice}")
+    # 直接发送到 tmux（kiro 模式，不检查 thinking）
+    tmux = get_tmux_backend()
+    tmux.send_text(text, config.win_id)
+    import asyncio as _asyncio
+    await _asyncio.sleep(config.tmux_send_delay)
+    tmux.send_keys("ENTER", config.win_id)
 
-    # 发送处理中提示
-    msg = await update.message.reply_text("⚙️ 处理中...")
+    # 记录活跃 chat_id，供回复捕获器使用
+    chat_id_file = os.path.join(DATA_DIR, "active_chat_id")
+    with open(chat_id_file, "w") as f:
+        f.write(str(update.message.chat_id))
 
-    try:
-        # 生成语音文件
-        output_file = f"/tmp/tts_{update.message.message_id}.mp3"
-        logger.debug(f"生成语音文件: {output_file}")
-        await text_to_speech(text, output_file, voice)
-
-        # 发送语音
-        logger.debug(f"发送语音消息: file_size={os.path.getsize(output_file)} bytes")
-        with open(output_file, "rb") as audio:
-            await update.message.reply_voice(audio)
-
-        # 删除临时文件
-        os.remove(output_file)
-        logger.debug(f"临时文件已删除: {output_file}")
-
-        # 删除处理中提示
-        await msg.delete()
-        logger.info(
-            f"TTS 处理成功: user_id={user_id}, message_id={update.message.message_id}"
-        )
-
-    except Exception as e:
-        logger.error(f"TTS 处理失败: user_id={user_id}, error={e}", exc_info=True)
-        await msg.edit_text(f"❌ 生成失败: {str(e)}")
+    await update.message.reply_text(f"✅ 已发送")
 
 
 async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -436,17 +407,17 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"收到语音消息: user_id={user_id}, duration={update.message.voice.duration}s"
     )
 
-    # 创建 A 队列文件（识别前）
-    queue_file = create_a_queue_file(
+    # 创建队列消息（识别前）
+    queue_id = create_a_queue_file(
         text="", user_id=user_id, chat_id=chat_id, message_id=message_id, is_text=False
     )
-    logger.debug(f"创建 A 队列文件: {queue_file}")
+    logger.debug(f"创建队列消息: {queue_id}")
 
     # 发送 ACK 消息
     ack_msg = await update.message.reply_text("🎧 识别中...")
 
     # 更新队列中的 ack_message_id
-    await update_a_queue_status(queue_file, "pending", int(ack_msg.message_id))
+    await update_a_queue_status(queue_id, "pending", int(ack_msg.message_id))
 
     try:
         # 下载语音文件
@@ -462,19 +433,18 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if not text:
             await ack_msg.edit_text("❌ 识别失败")
-            await update_a_queue_status(queue_file, "error")
+            await update_a_queue_status(queue_id, "error")
             return
 
         logger.info(f"语音识别成功: text='{text}'")
 
         # 更新队列，填入识别结果
-        with open(queue_file, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        data["text"] = text
-        data["status"] = "ready"
-        data["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        with open(queue_file, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False)
+        from .redis_queue import rq
+        data = rq.get(queue_id)
+        if data:
+            data["text"] = text
+            data["status"] = "ready"
+            rq.update(queue_id, data)
 
         # 编辑 ACK 消息为处理中
         await ack_msg.edit_text("⚙️ 处理中...")
@@ -482,7 +452,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"语音处理失败: {e}", exc_info=True)
         await ack_msg.edit_text("❌ 识别失败")
-        await update_a_queue_status(queue_file, "error")
+        await update_a_queue_status(queue_id, "error")
 
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):

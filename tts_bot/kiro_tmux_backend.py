@@ -3,6 +3,7 @@
 Kiro Tmux 后端实现
 """
 
+import os
 import subprocess
 from typing import Optional
 
@@ -10,15 +11,12 @@ from .tmux_backend import TmuxBackend
 from .config import config
 
 
+TMUX_SOCKET = os.environ.get("TMUX_SOCKET", "")
+TMUX_PREFIX = f"tmux -S {TMUX_SOCKET}" if TMUX_SOCKET else "tmux"
+
+
 def run_cmd(cmd: str) -> tuple[str, int]:
-    """执行 shell 命令
-
-    Args:
-        cmd: 命令字符串
-
-    Returns:
-        (输出, 返回码)
-    """
+    """执行 shell 命令"""
     try:
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
         return result.stdout, result.returncode
@@ -32,7 +30,7 @@ class KiroTmuxBackend(TmuxBackend):
     def send_text(self, text: str, win_id: str) -> bool:
         """发送文本到 tmux"""
         escaped = text.replace("'", "'\\''")
-        cmd = f"tmux send-keys -t '{win_id}' '{escaped}'"
+        cmd = f"{TMUX_PREFIX} send-keys -t '{win_id}' '{escaped}'"
         output, code = run_cmd(cmd)
         return code == 0
 
@@ -48,7 +46,7 @@ class KiroTmuxBackend(TmuxBackend):
             "CMD+C": "C-c",
         }
         key = key_map.get(keys, keys)
-        cmd = f"tmux send-keys -t '{win_id}' '{key}'"
+        cmd = f"{TMUX_PREFIX} send-keys -t '{win_id}' '{key}'"
         output, code = run_cmd(cmd)
         return code == 0
 
@@ -57,7 +55,7 @@ class KiroTmuxBackend(TmuxBackend):
         if max_rows is None:
             max_rows = config.capture_max_rows
 
-        cmd = f"tmux capture-pane -t '{win_id}' -p"
+        cmd = f"{TMUX_PREFIX} capture-pane -t '{win_id}' -p"
         output, code = run_cmd(cmd)
 
         if code != 0:
@@ -72,7 +70,7 @@ class KiroTmuxBackend(TmuxBackend):
 
     def check_thinking(self, win_id: str) -> bool:
         """检测 AI 是否处于 Thinking 状态"""
-        output, code = run_cmd(f"tmux capture-pane -t '{win_id}' -p -S -10")
+        output, code = run_cmd(f"{TMUX_PREFIX} capture-pane -t '{win_id}' -p -S -10")
         if code != 0:
             return False
         lines = output.rstrip().split("\n")
@@ -80,7 +78,7 @@ class KiroTmuxBackend(TmuxBackend):
 
     def get_pane_height(self, win_id: str) -> int:
         """获取当前窗格高度"""
-        output, code = run_cmd(f"tmux display -t '{win_id}' -p '#{{pane_height}}'")
+        output, code = run_cmd(f"{TMUX_PREFIX} display -t '{win_id}' -p '#{{pane_height}}'")
         if code == 0:
             try:
                 return int(output.strip())
@@ -90,13 +88,13 @@ class KiroTmuxBackend(TmuxBackend):
 
     def resize_pane(self, win_id: str, height: int) -> bool:
         """设置窗格高度"""
-        cmd = f"tmux resize-pane -t '{win_id}' -y {height}"
+        cmd = f"{TMUX_PREFIX} resize-pane -t '{win_id}' -y {height}"
         output, code = run_cmd(cmd)
         return code == 0
 
     def tree_sessions(self) -> str:
         """树状显示所有 session、window、pane"""
-        output, code = run_cmd("tmux list-sessions -F '#{session_name}' 2>/dev/null")
+        output, code = run_cmd(f"{TMUX_PREFIX} list-sessions -F '#{{session_name}}' 2>/dev/null")
         if code != 0:
             return "没有运行中的 session"
 
@@ -110,7 +108,7 @@ class KiroTmuxBackend(TmuxBackend):
 
             # 列出 windows
             win_output, _ = run_cmd(
-                f"tmux list-windows -t '{session}' -F '#{{window_index}} #{{window_name}}'"
+                f"{TMUX_PREFIX} list-windows -t '{session}' -F '#{{window_index}} #{{window_name}}'"
             )
             windows = [w for w in win_output.strip().split("\n") if w]
 
@@ -127,7 +125,7 @@ class KiroTmuxBackend(TmuxBackend):
 
                 # 列出 panes
                 pane_output, _ = run_cmd(
-                    f"tmux list-panes -t '{session}:{win_idx}' -F '#{{pane_index}} #{{pane_current_command}}'"
+                    f"{TMUX_PREFIX} list-panes -t '{session}:{win_idx}' -F '#{{pane_index}} #{{pane_current_command}}'"
                 )
                 panes = [p for p in pane_output.strip().split("\n") if p]
 
@@ -150,25 +148,25 @@ class KiroTmuxBackend(TmuxBackend):
     def new_window(self, session: str, window: str, command: str, win_id: str) -> bool:
         """创建新窗口"""
         # 创建新窗口
-        cmd1 = f"tmux new-window -t '{session}' -n '{window}'"
+        cmd1 = f"{TMUX_PREFIX} new-window -t '{session}' -n '{window}'"
         _, code1 = run_cmd(cmd1)
         if code1 != 0:
             return False
 
         # 发送初始命令
-        cmd2 = f"tmux send-keys -t '{session}:{window}' '{command}'"
+        cmd2 = f"{TMUX_PREFIX} send-keys -t '{session}:{window}' '{command}'"
         _, code2 = run_cmd(cmd2)
         if code2 != 0:
             return False
 
         # 发送回车
-        cmd3 = f"tmux send-keys -t '{session}:{window}' 'Enter'"
+        cmd3 = f"{TMUX_PREFIX} send-keys -t '{session}:{window}' 'Enter'"
         _, code3 = run_cmd(cmd3)
 
         return code3 == 0
 
     def del_window(self, win_id: str) -> bool:
         """删除窗口"""
-        cmd = f"tmux kill-window -t '{win_id}'"
+        cmd = f"{TMUX_PREFIX} kill-window -t '{win_id}'"
         output, code = run_cmd(cmd)
         return code == 0

@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import json
 import os
+import sys
 import uvicorn
 import asyncio
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
@@ -17,6 +18,10 @@ import speech_recognition as sr
 from pydub import AudioSegment
 
 app = FastAPI()
+
+# 加载 tts_bot 包
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from tts_bot.redis_queue import rq
 
 # 允许跨域
 app.add_middleware(
@@ -51,30 +56,28 @@ class Reply(BaseModel):
     chat_id: int
     full_text: str = None
 
+@app.get('/health')
+def health():
+    """健康检查"""
+    return {'status': 'ok', 'redis': rq.ping()}
+
 @app.get('/messages')
 def get_messages():
-    """获取待处理的消息"""
-    messages = []
-    if os.path.exists(QUEUE_DIR):
-        files = sorted([f for f in os.listdir(QUEUE_DIR) 
-                       if f.endswith('.json') and not f.endswith('_reply.json')])
-        
-        for filename in files:
-            filepath = os.path.join(QUEUE_DIR, filename)
-            try:
-                with open(filepath, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    if data.get('status') == 'pending':
-                        messages.append({
-                            'id': filename.replace('.json', ''),
-                            'text': data['text'],
-                            'username': data.get('username', 'Unknown'),
-                            'timestamp': data['timestamp']
-                        })
-            except:
-                pass
-    
-    return {'messages': messages}
+    """获取待处理的消息（从 Redis）"""
+    try:
+        pending = rq.client.lrange("tts:queue:pending", 0, -1)
+        messages = []
+        for msg_id in pending:
+            data = rq.get(msg_id)
+            if data and data.get('status') == 'pending':
+                messages.append({
+                    'id': msg_id,
+                    'text': data.get('text', ''),
+                    'timestamp': data.get('created_at', ''),
+                })
+        return {'messages': messages}
+    except Exception as e:
+        return {'messages': [], 'error': str(e)}
 
 @app.post('/open_window')
 async def open_window(data: dict):

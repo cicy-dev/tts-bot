@@ -11,12 +11,11 @@ from typing import Optional, List
 
 CONFIG_PATH = os.path.expanduser("~/.tts-bot/config.json")
 
-ac
 class Config:
     """TTS Bot 配置类"""
 
     def __init__(self):
-        self.win_id: str = "6:master.0"
+        self.win_id: str = "kiro:master.0"
         self.cut_max_rows: Optional[int] = None
         self.init_code: str = "kiro-cli"
         self.tny_decision_chars: List[str] = ["t", "n", "y"]
