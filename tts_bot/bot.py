@@ -37,7 +37,7 @@ from .default_stt import DefaultSTTBackend
 logger = logging.getLogger(__name__)
 
 # 配置路径
-DATA_DIR = os.path.expanduser("~/data/tts-tg-bot")
+DATA_DIR = os.getenv("DATA_DIR", os.path.expanduser("~/data/tts-tg-bot"))
 LOG_DIR = os.path.join(DATA_DIR, "logs")
 QUEUE_DIR = os.path.join(DATA_DIR, "queue")
 
@@ -45,8 +45,14 @@ QUEUE_DIR = os.path.join(DATA_DIR, "queue")
 os.makedirs(LOG_DIR, exist_ok=True)
 os.makedirs(QUEUE_DIR, exist_ok=True)
 
-# Bot Token
-TOKEN = open(os.path.join(DATA_DIR, "token.txt")).read().strip()
+# Bot Token（优先环境变量）
+TOKEN = os.getenv("BOT_TOKEN")
+if not TOKEN:
+    token_file = os.path.join(DATA_DIR, "token.txt")
+    if os.path.exists(token_file):
+        TOKEN = open(token_file).read().strip()
+if not TOKEN:
+    raise ValueError("BOT_TOKEN not found! Set BOT_TOKEN env or create token.txt")
 
 # 支持的语音列表
 VOICES = {

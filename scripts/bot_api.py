@@ -32,9 +32,13 @@ os.makedirs(QUEUE_DIR, exist_ok=True)
 DATA_DIR = os.path.expanduser("~/data/tts-tg-bot")
 TOKEN_FILE = os.path.join(DATA_DIR, 'token.txt')
 
-# 读取 bot token
-with open(TOKEN_FILE, 'r') as f:
-    BOT_TOKEN = f.read().strip()
+# 读取 bot token（优先环境变量）
+BOT_TOKEN = os.getenv('BOT_TOKEN')
+if not BOT_TOKEN and os.path.exists(TOKEN_FILE):
+    with open(TOKEN_FILE, 'r') as f:
+        BOT_TOKEN = f.read().strip()
+if not BOT_TOKEN:
+    raise ValueError("BOT_TOKEN not found! Set BOT_TOKEN env or create token.txt")
 
 bot = Bot(token=BOT_TOKEN)
 

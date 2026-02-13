@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  # 香港 Bot
+  tts-bot-hk:
+    build: .
+    container_name: tts-bot-hk
+    env_file: .env.hk
+    volumes:
+      - ./data-hk:/data
+      - /tmp/tmux-1000:/tmp/tmux-1000  # 香港的tmux socket
+    restart: unless-stopped
+    network_mode: host
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

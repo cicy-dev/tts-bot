@@ -1,0 +1,24 @@
+version: '3.8'
+
+services:
+  tts-bot:
+    build: .
+    container_name: tts-bot
+    environment:
+      - BOT_TOKEN=${BOT_TOKEN}
+      - DATA_DIR=/data
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
+    ports:
+      - "15001:15001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:15001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
