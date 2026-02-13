@@ -245,7 +245,12 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     with open(chat_id_file, "w") as f:
         f.write(str(update.message.chat_id))
 
-    await update.message.reply_text(f"✅ 已发送")
+    ack = await update.message.reply_text(f"✅ 已发送")
+
+    # 存 ack message_id，回复到达后删除
+    ack_file = os.path.join(DATA_DIR, "ack_message_id")
+    with open(ack_file, "w") as f:
+        f.write(str(ack.message_id))
 
 
 async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -413,8 +418,8 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     logger.debug(f"创建队列消息: {queue_id}")
 
-    # 发送 ACK 消息
-    ack_msg = await update.message.reply_text("🎧 识别中...")
+    # 发送 ACK 消息（reply 到用户语音）
+    ack_msg = await update.message.reply_text("🎧 识别中...", reply_to_message_id=message_id)
 
     # 更新队列中的 ack_message_id
     await update_a_queue_status(queue_id, "pending", int(ack_msg.message_id))
@@ -438,16 +443,24 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         logger.info(f"语音识别成功: text='{text}'")
 
-        # 更新队列，填入识别结果
-        from .redis_queue import rq
-        data = rq.get(queue_id)
-        if data:
-            data["text"] = text
-            data["status"] = "ready"
-            rq.update(queue_id, data)
+        # 发送到 tmux，跟文字消息一样
+        tmux = get_tmux_backend()
+        tmux.send_text(text, config.win_id)
+        import asyncio as _asyncio
+        await _asyncio.sleep(config.tmux_send_delay)
+        tmux.send_keys("ENTER", config.win_id)
 
-        # 编辑 ACK 消息为处理中
-        await ack_msg.edit_text("⚙️ 处理中...")
+        # 记录活跃 chat_id
+        chat_id_file = os.path.join(DATA_DIR, "active_chat_id")
+        with open(chat_id_file, "w") as f:
+            f.write(str(update.message.chat_id))
+
+        await ack_msg.edit_text(f"🎤 {text}")
+
+        # 存 ack message_id，回复到达后删除
+        ack_file = os.path.join(DATA_DIR, "ack_message_id")
+        with open(ack_file, "w") as f:
+            f.write(str(ack_msg.message_id))
 
     except Exception as e:
         logger.error(f"语音处理失败: {e}", exc_info=True)

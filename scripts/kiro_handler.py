@@ -42,30 +42,32 @@ def snapshot() -> str:
 def extract_new_reply(old: str, new: str) -> str:
     """提取最新的 kiro-cli 回复（最后一个 > 块）"""
     new_lines = [l for l in new.strip().split("\n") if l.strip()]
-    old_lines = [l for l in old.strip().split("\n") if l.strip()]
 
-    # 找最后一个 > 开头的回复块
+    # 找最后一个 > 开头行的位置，从那里开始正向收集
+    last_gt = -1
+    for i, line in enumerate(new_lines):
+        if line.strip().startswith("> "):
+            last_gt = i
+
+    if last_gt < 0:
+        return ""
+
     reply_lines = []
-    found = False
-    for line in reversed(new_lines):
+    for line in new_lines[last_gt:]:
         s = line.strip()
         if s.startswith("λ >") or s.startswith("▸ Credits:"):
-            if found:
-                break
-            continue
+            break
         if s.startswith("> "):
-            reply_lines.insert(0, s[2:])
-            found = True
-        elif found:
-            # 多行回复的续行
-            reply_lines.insert(0, line.rstrip())
+            reply_lines.append(s[2:])
+        else:
+            reply_lines.append(line.rstrip())
 
     if not reply_lines:
         return ""
 
     reply = "\n".join(reply_lines).strip()
 
-    # 检查这个回复是否已经在旧内容中（避免重复发送）
+    # 避免重复发送
     if reply in old:
         return ""
 
@@ -127,6 +129,10 @@ async def main():
             idle = is_idle(current)
 
             if not idle:
+                # 自动授权 [y/n/t]
+                if "[y/n/t]" in current or "Allow this action?" in current:
+                    tmux.send_keys("t", config.win_id)
+                    logger.info("自动发送 t 授权")
                 was_busy = True
                 last_snapshot = current
                 continue

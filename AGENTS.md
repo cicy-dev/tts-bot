@@ -158,16 +158,26 @@ logger.debug(f"TTS conversion complete: {output_file}")
 tts-bot/
 ├── tts_bot/          # Main package
 │   ├── __init__.py
-│   └── bot.py        # Main bot logic
-├── scripts/          # Utility scripts
-│   ├── bot_api.py    # HTTP API server
-│   ├── kiro_handler.py
-│   └── ...
-├── tests/            # Test suite
+│   ├── bot.py        # Telegram Bot (polling, message handling)
+│   ├── config.py     # Configuration
+│   ├── kiro_tmux_backend.py  # tmux operations
+│   ├── redis_queue.py        # Redis queue wrapper
+│   ├── tmux_backend.py       # tmux base class
+│   ├── stt_backend.py        # STT base class
+│   └── default_stt.py        # Google STT implementation
+├── scripts/
+│   ├── bot_api.py    # HTTP API server (/reply, /health)
+│   └── kiro_handler.py  # tmux reply capture daemon
+├── tests/
 │   ├── test_bot.py
 │   └── test_integration.py
-├── pyproject.toml    # Project config
-├── requirements.txt  # Dependencies
+├── docker-compose.yml
+├── docker-start.sh   # Container entrypoint (auto-reload)
+├── Dockerfile
+├── requirements.txt
+├── .env.example
+├── DEPLOY.md         # Deployment guide
+├── AGENTS.md         # Development guide (this file)
 └── README.md
 ```
 

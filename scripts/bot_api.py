@@ -160,30 +160,65 @@ async def voice_to_text(file: UploadFile = File(...)):
     except Exception as e:
         return {'error': str(e)}
 
+import edge_tts
+import tempfile
+
+TTS_VOICE = os.environ.get("TTS_VOICE", "zh-CN-YunxiNeural")
+SHORT_LIMIT = int(os.environ.get("TTS_SHORT_LIMIT", "200"))
+
+def split_reply(text: str):
+    """拆分回复：短摘要(TTS用) + 详细内容"""
+    if len(text) <= SHORT_LIMIT:
+        return text, None
+
+    # 提取第一句话作为摘要
+    import re
+    # 按中英文句号、感叹号、问号分割
+    match = re.search(r'[。！？.!?]', text)
+    if match and match.end() <= SHORT_LIMIT * 2:
+        summary = text[:match.end()]
+    else:
+        # 没找到句号就取前 SHORT_LIMIT 字 + "..."
+        summary = text[:SHORT_LIMIT] + "..."
+
+    return summary, text
+
 @app.post('/reply')
 async def post_reply(reply: Reply):
-    """提交回复并发送到 Telegram"""
+    """提交回复：语音(摘要) + 详细文字"""
     print(f"收到回复: {reply.dict()}", flush=True)
-    
+
     try:
-        # 如果有完整文本，添加"查看详情"按钮
-        if reply.full_text:
-            msg_id = f"{reply.chat_id}_{int(asyncio.get_event_loop().time())}"
-            full_messages[msg_id] = reply.full_text
-            
-            keyboard = [[InlineKeyboardButton("查看详情", callback_data=f"detail_{msg_id}")]]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            await bot.send_message(
-                chat_id=reply.chat_id,
-                text=reply.reply,
-                reply_markup=reply_markup
-            )
+        summary, detail = split_reply(reply.reply)
+
+        if detail:
+            # 长回复：只发文字
+            await bot.send_message(chat_id=reply.chat_id, text=reply.reply)
         else:
-            await bot.send_message(
-                chat_id=reply.chat_id,
-                text=reply.reply
-            )
+            # 短回复：语音 + caption
+            try:
+                with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
+                    tts_path = f.name
+                communicate = edge_tts.Communicate(summary, TTS_VOICE)
+                await communicate.save(tts_path)
+                with open(tts_path, "rb") as audio:
+                    await bot.send_voice(chat_id=reply.chat_id, voice=audio, caption=summary)
+                os.remove(tts_path)
+            except Exception as e:
+                print(f"TTS 失败: {e}", flush=True)
+                await bot.send_message(chat_id=reply.chat_id, text=summary)
+
+        # 删除 "已发送" ack 消息
+        ack_file = os.path.join(os.environ.get("DATA_DIR", "/data"), "ack_message_id")
+        try:
+            if os.path.exists(ack_file):
+                with open(ack_file) as f:
+                    ack_id = int(f.read().strip())
+                await bot.delete_message(chat_id=reply.chat_id, message_id=ack_id)
+                os.remove(ack_file)
+        except Exception:
+            pass
+
         return {'success': True, 'message': 'Message sent'}
     except Exception as e:
         print(f"发送失败: {e}", flush=True)
