@@ -140,7 +140,7 @@ class KiroTmuxBackend(TmuxBackend):
                     pane_indent = "    " if is_last_win else "│   "
                     pane_id = f"{session}:{win_idx}.{pane_idx}"
                     lines.append(
-                        f"{indent}{pane_indent}{pane_prefix} {pane_id} {pane_cmd}"
+                        f"{indent}{pane_indent}{pane_prefix} {pane_id}"
                     )
 
         return "\n".join(lines)

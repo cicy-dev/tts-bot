@@ -1,7 +1,16 @@
 #!/bin/bash
-# Docker 容器启动脚本 - 文件变化自动重载
+# Docker 容器启动脚本
+# 模式1: 有 bots.conf → supervisor 管理多 bot
+# 模式2: 无 bots.conf → 单 bot（原有逻辑）
 
 set -e
+
+if [ -f /app/bots.conf ] && grep -v '^#' /app/bots.conf | grep -q ','; then
+    echo "🚀 多 Bot 模式 (supervisor)"
+    exec python3 scripts/supervisor.py
+fi
+
+echo "🚀 单 Bot 模式"
 
 start_all() {
   echo "🚀 启动所有服务..."
@@ -20,20 +29,21 @@ kill_all() {
     [ -f "$f" ] && kill $(cat "$f") 2>/dev/null || true
   done
   sleep 1
+  # 确保 bot 完全退出，避免 Telegram polling 冲突
+  pkill -9 -f "tts_bot.bot" 2>/dev/null || true
+  sleep 1
 }
 
 start_all
 
-# 监听文件变化 + 进程守护
+# 监听文件变化
 watchmedo shell-command \
   --patterns="*.py" \
   --recursive \
   --command='echo "🔄 $(date +%H:%M:%S) 检测到代码变化: ${watch_src_path}, 重载中..."' \
   --drop \
   tts_bot/ scripts/ &
-WATCH_PID=$!
 
-# 主循环：检测文件变化触发重载 + 进程守护
 LAST_HASH=$(find tts_bot/ scripts/ -name "*.py" -exec md5sum {} + | sort | md5sum)
 
 while true; do

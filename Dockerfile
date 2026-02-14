@@ -14,6 +14,7 @@ COPY scripts/ ./scripts/
 
 # 启动脚本
 COPY docker-start.sh .
+COPY bots.conf* ./
 RUN chmod +x docker-start.sh
 
 CMD ["./docker-start.sh"]

@@ -14,8 +14,6 @@ import uvicorn
 import asyncio
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CallbackQueryHandler
-import speech_recognition as sr
-from pydub import AudioSegment
 
 app = FastAPI()
 
@@ -47,6 +45,31 @@ if not BOT_TOKEN:
 
 bot = Bot(token=BOT_TOKEN)
 
+# Bot 实例缓存 {bot_name: Bot}
+_bot_cache: dict[str, Bot] = {}
+
+
+def get_bot_by_name(bot_name: str) -> Bot:
+    """根据 bot_name 从 Redis session_map 获取对应 bot，默认返回当前 bot"""
+    if not bot_name:
+        return bot
+    if bot_name in _bot_cache:
+        return _bot_cache[bot_name]
+    # 尝试从 Redis 获取 bot token
+    try:
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+        from tts_bot.session_map import session_map
+        mapping = session_map.get_all()
+        for win_id, info in mapping.items():
+            if info.get("bot_name") == bot_name:
+                token = info.get("bot_token")
+                if token:
+                    _bot_cache[bot_name] = Bot(token=token)
+                    return _bot_cache[bot_name]
+    except Exception:
+        pass
+    return bot
+
 # 存储完整消息
 full_messages = {}
 
@@ -55,6 +78,7 @@ class Reply(BaseModel):
     reply: str
     chat_id: int
     full_text: str = None
+    bot_name: str = ""
 
 @app.get('/health')
 def health():
@@ -131,40 +155,110 @@ async def process_text(data: dict):
 
 @app.post('/voice_to_text')
 async def voice_to_text(file: UploadFile = File(...)):
-    """语音转文字"""
+    """语音转文字 - 调用 STT API(:15003)"""
     try:
-        # 保存上传的文件
-        temp_path = f"/tmp/{file.filename}"
-        with open(temp_path, 'wb') as f:
-            f.write(await file.read())
-        
-        # 转换为 WAV
-        audio = AudioSegment.from_file(temp_path)
-        wav_path = temp_path.replace('.ogg', '.wav')
-        audio.export(wav_path, format='wav')
-        
-        # 识别
-        recognizer = sr.Recognizer()
-        with sr.AudioFile(wav_path) as source:
-            audio_data = recognizer.record(source)
-            try:
-                text = recognizer.recognize_google(audio_data, language='zh-CN')
-            except:
-                text = recognizer.recognize_google(audio_data, language='en-US')
-        
-        # 清理
-        os.remove(temp_path)
-        os.remove(wav_path)
-        
-        return {'text': text}
+        import aiohttp
+        file_bytes = await file.read()
+        data = aiohttp.FormData()
+        data.add_field('file', file_bytes, filename=file.filename, content_type='audio/ogg')
+        async with aiohttp.ClientSession() as session:
+            async with session.post('http://localhost:15003/stt', data=data) as resp:
+                result = await resp.json()
+        if result.get('error'):
+            return {'error': result['error']}
+        return {'text': result.get('text', '')}
     except Exception as e:
         return {'error': str(e)}
 
-import edge_tts
+import re
 import tempfile
 
-TTS_VOICE = os.environ.get("TTS_VOICE", "zh-CN-YunxiNeural")
+
+def md_to_tg_html(text: str) -> str:
+    """Markdown → Telegram HTML 转换"""
+    # 保护代码块
+    code_blocks = []
+    def save_code(m):
+        code_blocks.append(m.group(1))
+        return f"__CODE_BLOCK_{len(code_blocks)-1}__"
+    text = re.sub(r'```(?:\w*)\n?(.*?)```', save_code, text, flags=re.DOTALL)
+
+    inline_codes = []
+    def save_inline(m):
+        inline_codes.append(m.group(1))
+        return f"__INLINE_CODE_{len(inline_codes)-1}__"
+    text = re.sub(r'`([^`]+)`', save_inline, text)
+
+    # Markdown 表格 → 可读文本
+    def convert_table(m):
+        lines = m.group(0).strip().split('\n')
+        rows = []
+        for line in lines:
+            cells = [c.strip() for c in line.strip('|').split('|')]
+            if all(re.match(r'^[-:]+$', c) for c in cells):
+                continue  # 跳过分隔行
+            rows.append(cells)
+        if not rows:
+            return m.group(0)
+        # 用 header: value 格式
+        if len(rows) > 1:
+            headers = rows[0]
+            result = []
+            for row in rows[1:]:
+                parts = [f"{headers[i]}: {row[i]}" for i in range(min(len(headers), len(row))) if row[i]]
+                result.append(' | '.join(parts))
+            return '\n'.join(result)
+        return ' | '.join(rows[0])
+    text = re.sub(r'(?:^\|.+\|$\n?)+', convert_table, text, flags=re.MULTILINE)
+
+    # 转义 HTML
+    text = text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+
+    # Markdown → HTML
+    text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
+    text = re.sub(r'__(.+?)__(?!CODE|INLINE)', r'<i>\1</i>', text)
+    text = re.sub(r'\*(.+?)\*', r'<i>\1</i>', text)
+
+    # 恢复代码块
+    for i, code in enumerate(code_blocks):
+        code = code.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+        text = text.replace(f"__CODE_BLOCK_{i}__", f"<pre>{code}</pre>")
+    for i, code in enumerate(inline_codes):
+        code = code.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+        text = text.replace(f"__INLINE_CODE_{i}__", f"<code>{code}</code>")
+
+    return text
+
+TTS_VOICE = os.environ.get("TTS_VOICE", "zh-CN-XiaoxiaoNeural")
 SHORT_LIMIT = int(os.environ.get("TTS_SHORT_LIMIT", "200"))
+
+# 动态语音配置文件
+VOICE_CONFIG_FILE = os.path.join(DATA_DIR, "tts_voice.txt")
+
+
+def get_tts_voice() -> str:
+    """获取当前 TTS 语音（优先读配置文件）"""
+    try:
+        if os.path.exists(VOICE_CONFIG_FILE):
+            with open(VOICE_CONFIG_FILE) as f:
+                return f.read().strip()
+    except Exception:
+        pass
+    return TTS_VOICE
+
+
+def set_tts_voice(voice: str):
+    """设置 TTS 语音"""
+    with open(VOICE_CONFIG_FILE, "w") as f:
+        f.write(voice)
+
+
+def strip_emoji(text: str) -> str:
+    """去掉 emoji 和特殊符号"""
+    return re.sub(
+        r'[\U0001F000-\U0001FFFF\U00002702-\U000027B0\U0000FE00-\U0000FE0F\U0000200D\U00002600-\U000026FF\U00002B50-\U00002B55]+',
+        '', text
+    ).strip()
 
 def split_reply(text: str):
     """拆分回复：短摘要(TTS用) + 详细内容"""
@@ -183,30 +277,53 @@ def split_reply(text: str):
 
     return summary, text
 
+@app.post('/set_voice')
+async def api_set_voice(data: dict):
+    """设置 TTS 语音"""
+    voice = data.get('voice', '')
+    if voice:
+        set_tts_voice(voice)
+        return {'success': True, 'voice': voice}
+    return {'success': False, 'current': get_tts_voice()}
+
+
+@app.get('/get_voice')
+async def api_get_voice():
+    """获取当前 TTS 语音"""
+    return {'voice': get_tts_voice()}
+
+
 @app.post('/reply')
 async def post_reply(reply: Reply):
-    """提交回复：语音(摘要) + 详细文字"""
-    print(f"收到回复: {reply.dict()}", flush=True)
+    """提交回复：根据 bot_name 找到对应 bot 发送"""
+    print(f"收到回复: bot={reply.bot_name}, chat={reply.chat_id}, len={len(reply.reply)}", flush=True)
+
+    # 根据 bot_name 获取对应的 bot 实例
+    send_bot = get_bot_by_name(reply.bot_name)
 
     try:
         summary, detail = split_reply(reply.reply)
 
         if detail:
-            # 长回复：只发文字
-            await bot.send_message(chat_id=reply.chat_id, text=reply.reply)
+            await send_bot.send_message(chat_id=reply.chat_id, text=md_to_tg_html(reply.reply), parse_mode='HTML')
         else:
             # 短回复：语音 + caption
             try:
+                html_summary = md_to_tg_html(summary)
+                import aiohttp
+                async with aiohttp.ClientSession() as session:
+                    async with session.post('http://localhost:15002/tts',
+                        json={"text": strip_emoji(summary)}) as resp:
+                        tts_data = await resp.read()
                 with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
+                    f.write(tts_data)
                     tts_path = f.name
-                communicate = edge_tts.Communicate(summary, TTS_VOICE)
-                await communicate.save(tts_path)
                 with open(tts_path, "rb") as audio:
-                    await bot.send_voice(chat_id=reply.chat_id, voice=audio, caption=summary)
+                    await send_bot.send_voice(chat_id=reply.chat_id, voice=audio, caption=html_summary, parse_mode='HTML')
                 os.remove(tts_path)
             except Exception as e:
                 print(f"TTS 失败: {e}", flush=True)
-                await bot.send_message(chat_id=reply.chat_id, text=summary)
+                await send_bot.send_message(chat_id=reply.chat_id, text=html_summary, parse_mode='HTML')
 
         # 删除 "已发送" ack 消息
         ack_file = os.path.join(os.environ.get("DATA_DIR", "/data"), "ack_message_id")
@@ -214,7 +331,7 @@ async def post_reply(reply: Reply):
             if os.path.exists(ack_file):
                 with open(ack_file) as f:
                     ack_id = int(f.read().strip())
-                await bot.delete_message(chat_id=reply.chat_id, message_id=ack_id)
+                await send_bot.delete_message(chat_id=reply.chat_id, message_id=ack_id)
                 os.remove(ack_file)
         except Exception:
             pass
