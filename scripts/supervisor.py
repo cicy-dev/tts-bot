@@ -62,102 +62,64 @@ def ensure_tmux_session(session_name: str):
         logger.info(f"📺 创建 tmux session: {session_name}")
 
 
-TTYD_PORT_BASE = 7680
+def ensure_tmux_window(group: str, bot_name: str, workspace: str = "") -> str:
+    """确保 group session 里有 bot_name window，返回 win_id"""
+    ensure_tmux_session(group)
+    # 检查 window 是否存在
+    check = subprocess.run(
+        ["tmux", "-S", TMUX_SOCKET, "list-windows", "-t", group, "-F", "#{window_name}"],
+        capture_output=True, text=True,
+    )
+    windows = check.stdout.strip().split("\n") if check.stdout.strip() else []
+    created = False
+    if bot_name not in windows:
+        # 如果只有默认 master window 且是空的，重命名它
+        if len(windows) == 1 and windows[0] == "master":
+            subprocess.run(
+                ["tmux", "-S", TMUX_SOCKET, "rename-window", "-t", f"{group}:master", bot_name],
+                capture_output=True,
+            )
+        else:
+            subprocess.run(
+                ["tmux", "-S", TMUX_SOCKET, "new-window", "-t", group, "-n", bot_name],
+                capture_output=True,
+            )
+        created = True
+        logger.info(f"📺 创建 window: {group}:{bot_name}")
+    win_id = f"{group}:{bot_name}"
+    # 只在新建 window 时才发送 init 命令
+    if created:
+        wd = workspace or f"~/workers/{bot_name}"
+        init_cmd = (
+            f"mkdir -p {wd}/.kiro/steering && "
+            f"for f in ~/workers/.template/*.md; do "
+            f"t={wd}/.kiro/steering/$(basename $f); "
+            f"[ ! -f $t ] && sed 's/{{{{BOT_NAME}}}}/{bot_name}/g' $f > $t; "
+            f"done; cd {wd} && kiro-cli"
+        )
+        subprocess.run(
+            ["tmux", "-S", TMUX_SOCKET, "send-keys", "-t", win_id, init_cmd, "Enter"],
+            capture_output=True,
+        )
+    return win_id
 
-# {session_name: {"proc": Popen, "port": int}}
-ttyd_procs: dict[str, dict] = {}
-_used_ports: set[int] = set()
 
-def _alloc_port() -> int:
-    """分配一个可用端口"""
-    port = TTYD_PORT_BASE
-    while port in _used_ports:
-        port += 1
-    _used_ports.add(port)
-    return port
+router_proc = None
 
-def _free_port(port: int):
-    """释放端口"""
-    _used_ports.discard(port)
 
-def ensure_ttyd(session_name: str) -> int:
-    """确保 session 有对应的 ttyd，返回端口"""
-    global _next_ttyd_port
-    if session_name in ttyd_procs and ttyd_procs[session_name]["proc"].poll() is None:
-        return ttyd_procs[session_name]["port"]
-
-    port = _alloc_port()
-
+def start_router():
+    global router_proc
     proc = subprocess.Popen(
-        ["ttyd", "-p", str(port), "-W",
-         "-c", "admin:pb200898",
-         "--base-path", f"/{session_name}",
-         "tmux", "-S", TMUX_SOCKET, "attach-session", "-t", session_name],
-        stdout=open(f"/tmp/ttyd_{session_name}.log", "w"),
+        [sys.executable, "-u", "scripts/bot_router.py"],
+        stdout=open("/tmp/bot_router.log", "w"),
         stderr=subprocess.STDOUT,
     )
-    ttyd_procs[session_name] = {"proc": proc, "port": port}
-    logger.info(f"📺 启动 ttyd: /{session_name} → :{port} (pid={proc.pid})")
-    # 更新 nginx 配置
-    update_nginx()
-    return port
-
-
-def update_nginx():
-    """根据当前 ttyd 实例更新 nginx 配置"""
-    locations = ""
-    for name, info in ttyd_procs.items():
-        if info["proc"].poll() is None:
-            port = info["port"]
-            locations += f"""
-        location /{name}/ {{
-            if ($arg_token != "pb200898") {{
-                return 403;
-            }}
-            proxy_pass http://127.0.0.1:{port}/{name}/;
-            proxy_http_version 1.1;
-            proxy_set_header Upgrade $http_upgrade;
-            proxy_set_header Connection $connection_upgrade;
-            proxy_set_header Host $host;
-            proxy_read_timeout 86400;
-        }}
-
-        location = /{name} {{
-            return 302 /{name}/?token=$arg_token;
-        }}
-"""
-
-    conf = f"""error_log /tmp/nginx_error.log;
-pid /tmp/nginx.pid;
-
-events {{
-    worker_connections 1024;
-}}
-
-http {{
-    access_log /tmp/nginx_access.log;
-
-    map $http_upgrade $connection_upgrade {{
-        default upgrade;
-        '' close;
-    }}
-
-    server {{
-        listen 12345;
-        server_name _;
-{locations}
-    }}
-}}
-"""
-    conf_path = "/tmp/nginx_dynamic.conf"
-    with open(conf_path, "w") as f:
-        f.write(conf)
-    subprocess.run(["nginx", "-s", "reload", "-c", conf_path], capture_output=True)
-    logger.info(f"🔄 Nginx 配置已更新 ({len(ttyd_procs)} sessions)")
+    logger.info(f"✅ 启动 Router (pid={proc.pid})")
+    router_proc = proc
 
 
 def parse_conf() -> list[dict] | None:
-    """解析 bots.conf"""
+    """解析 bots.conf — bot_name,group[,workspace] 格式"""
     if not os.path.exists(CONF_PATH):
         return None
     entries = []
@@ -166,12 +128,13 @@ def parse_conf() -> list[dict] | None:
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
-            parts = line.split(",", 1)
-            token = parts[0].strip()
-            session = parts[1].strip() if len(parts) > 1 and parts[1].strip() else ""
-            if not token:
+            parts = [p.strip() for p in line.split(",")]
+            bot_name = parts[0]
+            group = parts[1] if len(parts) > 1 and parts[1] else "worker"
+            workspace = parts[2] if len(parts) > 2 and parts[2] else ""
+            if not bot_name:
                 continue
-            entries.append({"token": token, "session": session})
+            entries.append({"bot_name": bot_name, "group": group, "workspace": workspace})
     return entries if entries else None
 
 
@@ -182,12 +145,13 @@ def conf_hash() -> str:
         return hashlib.md5(f.read()).hexdigest()
 
 
-def start_bot(token: str, bot_name: str, session: str, port: int):
+def start_bot(token: str, bot_name: str, group: str, win_id: str, port: int):
     """启动一个 bot 进程"""
     env = os.environ.copy()
     env["BOT_TOKEN"] = token
     env["BOT_NAME"] = bot_name
-    env["TMUX_SESSION"] = session
+    env["TMUX_SESSION"] = group
+    env["TMUX_WIN_ID"] = win_id
     env["API_PORT"] = str(port)
 
     proc = subprocess.Popen(
@@ -196,31 +160,20 @@ def start_bot(token: str, bot_name: str, session: str, port: int):
         stdout=open(f"/tmp/bot_{bot_name}.log", "w"),
         stderr=subprocess.STDOUT,
     )
-    logger.info(f"✅ 启动 bot: {bot_name} (session={session}, port={port}, pid={proc.pid})")
+    logger.info(f"✅ 启动 bot: {bot_name} (group={group}, win_id={win_id}, port={port}, pid={proc.pid})")
     return proc
 
 
 def stop_bot(key: str):
-    """停止一个 bot 及其 ttyd"""
+    """停止一个 bot"""
     if key in bots:
         info = bots[key]
-        session = info["session"]
-        # 停 bot
         if info["proc"].poll() is None:
             info["proc"].terminate()
             try:
                 info["proc"].wait(timeout=5)
             except subprocess.TimeoutExpired:
                 info["proc"].kill()
-        # 停 ttyd
-        if session in ttyd_procs:
-            ttyd_info = ttyd_procs[session]
-            if ttyd_info["proc"].poll() is None:
-                ttyd_info["proc"].terminate()
-            _free_port(ttyd_info["port"])
-            del ttyd_procs[session]
-            logger.info(f"♻️ 回收 ttyd: /{session} (port={ttyd_info['port']})")
-            update_nginx()
         logger.info(f"❌ 停止 bot: {info['bot_name']}")
         del bots[key]
 
@@ -249,6 +202,8 @@ def start_handler():
 
 def sync_bots():
     """同步配置和运行中的 bot"""
+    from token_manager import ensure_token
+
     entries = parse_conf()
 
     # 配置不存在或为空 → 保持现状，只守护
@@ -260,32 +215,32 @@ def sync_bots():
         return
 
     conf_keys = set()
-    port = API_PORT_BASE
 
     for entry in entries:
-        key = token_key(entry["token"])
+        bot_name = entry["bot_name"]
+        group = entry["group"]
+        workspace = entry.get("workspace", "")
+        key = bot_name
+
         conf_keys.add(key)
 
         if key not in bots:
-            # 新 bot：获取 name，确定 session
-            if entry["session"]:
-                session = entry["session"]
-                bot_name = session
-            else:
-                bot_name = fetch_bot_name(entry["token"])
-                session = bot_name.replace("@", "").replace("_bot", "").replace("Bot", "")
+            token = ensure_token(bot_name)
+            if not token:
+                logger.error(f"❌ {bot_name}: 无法获取 token，跳过")
+                continue
 
-            ensure_tmux_session(session)
-            ensure_ttyd(session)
-            proc = start_bot(entry["token"], bot_name, session, port)
+            win_id = ensure_tmux_window(group, bot_name, workspace)
+            port = int(os.environ.get("API_PORT", 15001))
+            proc = start_bot(token, bot_name, group, win_id, port)
             bots[key] = {
                 "proc": proc,
-                "token": entry["token"],
+                "token": token,
                 "bot_name": bot_name,
-                "session": session,
+                "group": group,
+                "win_id": win_id,
                 "port": port,
             }
-        port += 1
 
     # 停止已移除的
     for key in set(bots.keys()) - conf_keys:
@@ -304,6 +259,8 @@ def cleanup(signum, frame):
         stop_bot(key)
     if handler_proc and handler_proc.poll() is None:
         handler_proc.terminate()
+    if router_proc and router_proc.poll() is None:
+        router_proc.terminate()
     if api_proc and api_proc.poll() is None:
         api_proc.terminate()
     sys.exit(0)
@@ -319,14 +276,22 @@ def main():
     logger.info("=" * 50)
 
     start_api()
-    start_handler()
 
-    last_hash = ""
+    # 先启动 bot（注册 session_map），再启动 handler
+    last_hash = conf_hash()
+    sync_bots()
+
+    # bot 注册需要几秒
+    import time as _t
+    _t.sleep(5)
+    start_handler()
+    # router 已移到宿主机 node.js 运行
+    # start_router()
+
     while True:
         current_hash = conf_hash()
         if current_hash != last_hash:
-            if last_hash:
-                logger.info("📋 配置变化，同步中...")
+            logger.info("📋 配置变化，同步中...")
             sync_bots()
             last_hash = current_hash
 
@@ -337,20 +302,10 @@ def main():
         if api_proc and api_proc.poll() is not None:
             logger.warning("⚠️ API 崩溃，重启...")
             start_api()
-
-        # 回收死掉的 ttyd，释放端口
-        for name in list(ttyd_procs.keys()):
-            info = ttyd_procs[name]
-            if info["proc"].poll() is not None:
-                port = info["port"]
-                _free_port(port)
-                del ttyd_procs[name]
-                logger.info(f"♻️ 回收 ttyd: /{name} (port={port})")
-                # 如果 bot 还在运行，重新启动 ttyd
-                for key, bot_info in bots.items():
-                    if bot_info["session"] == name and bot_info["proc"].poll() is None:
-                        ensure_ttyd(name)
-                        break
+        # router 已移到宿主机 node.js 运行
+        # if router_proc and router_proc.poll() is not None:
+        #     logger.warning("⚠️ Router 崩溃，重启...")
+        #     start_router()
 
         time.sleep(POLL_INTERVAL)
 
