@@ -15,11 +15,11 @@ class Config:
     """TTS Bot 配置类"""
 
     def __init__(self):
-        self.win_id: str = "kiro_master:0"
         self.cut_max_rows: Optional[int] = None
         self.init_code: str = "kiro-cli"
         self.tny_decision_chars: List[str] = ["t", "n", "y"]
         self.tmux_send_delay: float = 1.0
+        self.work_dir: str = ""
         self._load()
 
     def _load(self) -> None:
@@ -29,7 +29,6 @@ class Config:
             try:
                 with open(config_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                self.win_id = data.get("win_id", self.win_id)
                 self.cut_max_rows = data.get("cut_max_rows", self.cut_max_rows)
                 self.init_code = data.get("init_code", self.init_code)
                 self.tny_decision_chars = data.get(
@@ -45,7 +44,6 @@ class Config:
         config_dir.mkdir(parents=True, exist_ok=True)
         try:
             data = {
-                "win_id": self.win_id,
                 "cut_max_rows": self.cut_max_rows,
                 "init_code": self.init_code,
                 "tny_decision_chars": self.tny_decision_chars,
@@ -55,11 +53,6 @@ class Config:
                 json.dump(data, f, ensure_ascii=False, indent=2)
         except Exception as e:
             print(f"⚠️ 配置文件保存失败: {e}")
-
-    def set_win_id(self, win_id: str) -> None:
-        """设置当前 win_id"""
-        self.win_id = win_id
-        self._save()
 
     def set_cut_max_rows(self, rows: Optional[int]) -> None:
         """设置最大截取行数"""

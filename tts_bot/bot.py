@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Optional
 
 import aiohttp
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -45,15 +45,6 @@ QUEUE_DIR = os.path.join(DATA_DIR, "queue")
 # 确保目录存在
 os.makedirs(LOG_DIR, exist_ok=True)
 os.makedirs(QUEUE_DIR, exist_ok=True)
-
-# Bot Token（优先环境变量）
-TOKEN = os.getenv("BOT_TOKEN")
-if not TOKEN:
-    token_file = os.path.join(DATA_DIR, "token.txt")
-    if os.path.exists(token_file):
-        TOKEN = open(token_file).read().strip()
-if not TOKEN:
-    raise ValueError("BOT_TOKEN not found! Set BOT_TOKEN env or create token.txt")
 
 # 支持的语音列表
 VOICES = {
@@ -125,39 +116,25 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_voices[user_id] = VOICES["中文女声"]
     logger.debug(f"设置默认语音: user_id={user_id}, voice={VOICES['中文女声']}")
 
-    help_text = """👋 你好！我是 W3C TTS Bot
-_______________________________________________
-⌨️ 方向键
-           /up
-/left  /down  /right
+    bot_name = os.getenv("BOT_NAME", "kiro-bot")
+    router_token = os.getenv("ROUTER_TOKEN", "")
+    terminal_url = f"https://g-12345.cicy.de5.net/{bot_name}/?token={router_token}"
 
-🔧 控制
-/esc  /enter  /ctrlc
+    # 欢迎消息
+    welcome_text = """👋 欢迎使用 bot！
 
-🤖 Kiro
-/yes  /no  /trust - 授权 [y/n/t]
-
-📋 工具
-/voice  /tree  /capture
+💬 你可以直接发送消息与我对话
+⌨️ 使用下方键盘快速导航
 """
-
-    # 创建Mini App按钮
-    keyboard = []
-    tmux_session = os.getenv("TMUX_SESSION", "kiro_master")
-    terminal_url = f"https://g-12345.cicy.de5.net/{tmux_session}/?token=pb200898"
-    if user_id == OWNER_ID:
-        keyboard.append([InlineKeyboardButton("🖥️ 打开终端", web_app=WebAppInfo(url=terminal_url))])
-        keyboard.append([InlineKeyboardButton("🖥️ VNC 桌面", url="https://g-6080.cicy.de5.net/"), InlineKeyboardButton("🖥️ VNC 桌面2", url="https://g-6082.cicy.de5.net/")])
-        keyboard.append([InlineKeyboardButton("💻 Code Web", url="https://g-8080.cicy.de5.net/")])
-        keyboard.append([InlineKeyboardButton("📊 1Panel", url="https://g-16789.cicy.de5.net"), InlineKeyboardButton("🚨 1Panel急", url="http://35.241.96.74:16789/7ae664ac51")])
-        keyboard.append([InlineKeyboardButton("🔗 Linker", url="https://one.dash.cloudflare.com/73595dcb392b333ce6be9c923cc30930/networks/connectors/cloudflare-tunnels/cfd_tunnel/b948abd4-c804-4f96-b145-182f96bc085e/edit?tab=publicHostname")])
-    reply_markup = InlineKeyboardMarkup(keyboard)
     
-    await update.message.reply_text(
-        help_text,
-        parse_mode='HTML',
-        reply_markup=reply_markup
+    # Reply keyboard with admin button
+    reply_kb = ReplyKeyboardMarkup(
+        [["/admin"]],
+        resize_keyboard=True,
+        one_time_keyboard=False
     )
+    
+    await update.message.reply_text(welcome_text, reply_markup=reply_kb)
 
 
 async def voice_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -178,38 +155,110 @@ async def voice_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-def create_a_queue_file(
-    text: str, user_id: int, chat_id: int, message_id: int, is_text: bool = False
-) -> str:
-    """创建队列消息（Redis）"""
-    from .redis_queue import rq
-    import time as _time
+async def keys_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理 /keys 命令 - 显示主要按键 inline keyboard"""
+    keyboard = [
+        [
+            InlineKeyboardButton("⬆️", callback_data="key_up"),
+            InlineKeyboardButton("⬇️", callback_data="key_down"),
+            InlineKeyboardButton("⬅️", callback_data="key_left"),
+            InlineKeyboardButton("➡️", callback_data="key_right"),
+        ],
+        [
+            InlineKeyboardButton("✅ yes", callback_data="key_yes"),
+            InlineKeyboardButton("❌ no", callback_data="key_no"),
+            InlineKeyboardButton("🔓 trust", callback_data="key_trust"),
+        ],
+        [
+            InlineKeyboardButton("⏎ enter", callback_data="key_enter"),
+            InlineKeyboardButton("⎋ esc", callback_data="key_esc"),
+            InlineKeyboardButton("⛔ ctrl+c", callback_data="key_ctrlc"),
+        ],
+        [
+            InlineKeyboardButton("📋 capture", callback_data="key_capture"),
+        ],
+        [
+            InlineKeyboardButton("❌ 取消", callback_data="cancel_keys"),
+        ],
+    ]
+    await update.message.reply_text(
+        "⌨️ 快捷键盘\n" + "─" * 30,
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
-    msg_id = f"msg_{int(_time.time())}_{message_id}"
-    data = {
-        "message_id": message_id,
-        "chat_id": chat_id,
-        "user_id": user_id,
-        "text": text,
-        "is_text": is_text,
-    }
-    rq.push(msg_id, data)
-    return msg_id
+
+async def ttyd_token_refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理 /ttyd_token_refresh 命令 - 刷新所有 ttyd token（仅 owner）"""
+    user_id = update.effective_user.id
+    if user_id != OWNER_ID:
+        await update.message.reply_text("❌ 无权限")
+        return
+    
+    await update.message.reply_text("🔄 正在刷新所有 ttyd token...")
+    
+    # 触发 supervisor 重新加载配置
+    try:
+        import pymysql
+        mysql_pass = os.getenv("MYSQL_PASSWORD", "")
+        conn = pymysql.connect(host='localhost', user='root', password=mysql_pass, database='tts_bot')
+        c = conn.cursor()
+        # 修改一个字段触发 hash 变化
+        c.execute("UPDATE bot_config SET status='active' WHERE status='active'")
+        conn.commit()
+        c.close()
+        conn.close()
+        
+        await update.message.reply_text("✅ 已触发刷新，请等待 10 秒后重新打开 /admin 查看新链接")
+    except Exception as e:
+        await update.message.reply_text(f"❌ 刷新失败: {e}")
 
 
-async def update_a_queue_status(
-    queue_id: str, status: str, ack_message_id: int = None
-):
-    """更新队列状态（Redis）"""
-    from .redis_queue import rq
 
-    data = rq.get(queue_id)
-    if data:
-        data["status"] = status
-        if ack_message_id:
-            data["ack_message_id"] = ack_message_id
-        rq.update(queue_id, data)
-
+async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理 /admin 命令 - 显示所有管理工具（仅 owner）"""
+    user_id = update.effective_user.id
+    if user_id != OWNER_ID:
+        await update.message.reply_text("❌ 无权限")
+        return
+    
+    # 获取当前 bot 的 ttyd 端口
+    ttyd_port = None
+    try:
+        import pymysql
+        mysql_pass = os.getenv("MYSQL_PASSWORD", "")
+        conn = pymysql.connect(host='localhost', user='root', password=mysql_pass, database='tts_bot')
+        c = conn.cursor()
+        c.execute("SELECT ttyd_port FROM bot_config WHERE bot_name=%s", (bot_name,))
+        row = c.fetchone()
+        if row:
+            ttyd_port = row[0]
+        c.close()
+        conn.close()
+    except Exception as e:
+        logger.error(f"获取 ttyd 端口失败: {e}")
+    
+    keyboard = [
+        [InlineKeyboardButton("🗄️ phpMyAdmin", url="https://g-12222.cicy.de5.net")],
+    ]
+    
+    # 添加当前 bot 的 ttyd 链接（通过 cloudflare tunnel）
+    if ttyd_port:
+        keyboard.append([InlineKeyboardButton("🖥️ Terminal", url=f"https://g-{ttyd_port}.cicy.de5.net")])
+    
+    keyboard.extend([
+        [InlineKeyboardButton("🖥️ VNC1", url="https://g-6080.cicy.de5.net"), 
+         InlineKeyboardButton("🖥️ VNC2", url="https://g-6082.cicy.de5.net")],
+        [InlineKeyboardButton("💻 Code Web", url="https://g-8080.cicy.de5.net")],
+        [InlineKeyboardButton("📊 1Panel", url="https://g-16789.cicy.de5.net"), 
+         InlineKeyboardButton("🚨 1Panel急", url="http://35.241.96.74:16789/7ae664ac51")],
+        [InlineKeyboardButton("🔗 Linker", url="https://one.dash.cloudflare.com/73595dcb392b333ce6be9c923cc30930/networks/connectors/cloudflare-tunnels/cfd_tunnel/b948abd4-c804-4f96-b145-182f96bc085e/edit?tab=publicHostname")],
+        [InlineKeyboardButton("❌ 取消", callback_data="cancel_admin")],
+    ])
+    
+    await update.message.reply_text(
+        "🛠️ 管理工具面板\n" + "─" * 30,
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理文字消息 - 直接发送到 tmux，不检查 thinking"""
@@ -219,11 +268,29 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not text:
         return
 
+    # /tts on|off 控制
+    if text.strip().lower() in ("/tts on", "/tts off"):
+        val = "1" if "on" in text.lower() else "0"
+        from tts_bot.session_map import session_map
+        session_map.set_var("tts_enabled", val)
+        await update.message.reply_text(f"TTS {'✅ 开启' if val == '1' else '❌ 关闭'}")
+        return
+
+    # 键盘按钮映射
+    KB_MAP = {
+        "⬆️": "/up", "⬇️": "/down", "⬅️": "/left", "➡️": "/right",
+        "✅ yes": "/yes", "❌ no": "/no", "🔓 trust": "/trust",
+        "⎋ esc": "/esc", "⏎ enter": "/enter", "⛔ ctrl+c": "/ctrlc",
+        "📋 capture": "/capture",
+    }
+    if text in KB_MAP:
+        text = KB_MAP[text]
+
     # 检查是否为 t/n/y 决策字符
     if len(text) == 1 and config.is_tny_char(text):
         logger.info(f"收到 t/n/y 决策: user_id={user_id}, char={text}")
         tmux = get_tmux_backend()
-        tmux.send_keys(text, config.win_id)
+        tmux.send_msg(text, win_id)
         return
 
     # 检查是否为特殊命令
@@ -233,30 +300,32 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     logger.info(f"收到文字消息: user_id={user_id}, text='{text[:100]}...'")
 
-    # 发送到两个 tmux 会话
+    # 直接发送到 tmux（像真人打字一样）
     tmux = get_tmux_backend()
-    import asyncio as _asyncio
-    
-    # 1. 发送到 kimi（带延迟）
-    tmux.send_text(text, "kimi:master")
-    await _asyncio.sleep(1.0)
-    tmux.send_keys("ENTER", "kimi:master")
-    
-    # 2. 发送到 kiro（我）
-    tmux.send_text(text, config.win_id)
-    await _asyncio.sleep(config.tmux_send_delay)
-    tmux.send_keys("ENTER", config.win_id)
+    tmux.send_msg(text, win_id)
+    logger.info(f"已发送到 tmux: {bot_name} → {win_id}")
 
-    # 记录活跃 chat_id，供回复捕获器使用
-    chat_id_file = os.path.join(DATA_DIR, "active_chat_id")
-    with open(chat_id_file, "w") as f:
-        f.write(str(update.message.chat_id))
+    # 记录 Q&A pair 到 MySQL（question 部分）
+    try:
+        import pymysql as _pymysql
+        _conn = _pymysql.connect(
+            host='localhost', user='root',
+            password=os.getenv("MYSQL_PASSWORD", ""),
+            database='tts_bot', charset='utf8mb4', autocommit=True
+        )
+        _c = _conn.cursor()
+        _c.execute("""
+            INSERT INTO qa_pair (bot_name, chat_id, question, status)
+            VALUES (%s, %s, %s, 'pending')
+        """, (bot_name, update.message.chat_id, text))
+        _c.close()
+        _conn.close()
+    except Exception as e:
+        logger.warning(f"记录 QA pair 失败: {e}")
 
-    # 发送状态消息，回复到达后自动删除
-    ack_msg = await update.message.reply_text("💭 Thinking...", parse_mode='HTML')
-    ack_file = os.path.join(DATA_DIR, "ack_message_id")
-    with open(ack_file, "w") as f:
-        f.write(str(ack_msg.message_id))
+    # 更新 session_map 中的 chat_id
+    from tts_bot.session_map import session_map
+    session_map.update_chat_id(win_id, update.message.chat_id)
 
 
 async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -289,42 +358,59 @@ async def handle_special_command(
 
     try:
         if cmd == "left":
-            tmux.send_keys("LEFT", config.win_id)
+            tmux.send_keys("LEFT", win_id)
 
         elif cmd == "right":
-            tmux.send_keys("RIGHT", config.win_id)
+            tmux.send_keys("RIGHT", win_id)
 
         elif cmd == "up":
-            tmux.send_keys("UP", config.win_id)
+            tmux.send_keys("UP", win_id)
 
         elif cmd == "down":
-            tmux.send_keys("DOWN", config.win_id)
+            tmux.send_keys("DOWN", win_id)
 
         elif cmd == "capture":
-            content = tmux.capture_pane(config.win_id, max_rows=30)
+            content = tmux.capture_pane(win_id, max_rows=30)
             await update.message.reply_text(f"<pre>{content}</pre>", parse_mode='HTML')
 
-        elif cmd == "tree":
+        elif cmd == "tre":
             tree = tmux.tree_sessions()
             await update.message.reply_text(f"<pre>{tree}</pre>", parse_mode='HTML')
 
+        elif cmd == "map":
+            from tts_bot.session_map import session_map
+            mapping = session_map.get_all()
+            lines = ["🗺️ <b>Session Map</b>\n"]
+            # 加上master（小K自己）
+            lines.append("👑 <b>master</b>")
+            lines.append("  ├ master:cicy_master_xk_bot → 小K")
+            groups = {}
+            for wid, info in mapping.items():
+                g = info.get("group", "unknown")
+                groups.setdefault(g, []).append((wid, info["bot_name"]))
+            for g in sorted(groups.keys()):
+                lines.append(f"\n📁 <b>{g}</b>")
+                for wid, name in groups[g]:
+                    lines.append(f"  ├ {wid} → {name}")
+            await update.message.reply_text("\n".join(lines), parse_mode='HTML')
+
         elif cmd == "esc":
-            tmux.send_keys("Escape", config.win_id)
+            tmux.send_keys("Escape", win_id)
 
         elif cmd == "enter":
-            tmux.send_keys("Enter", config.win_id)
+            tmux.send_keys("Enter", win_id)
 
         elif cmd == "ctrlc":
-            tmux.send_keys("C-c", config.win_id)
+            tmux.send_keys("C-c", win_id)
 
         elif cmd == "trust":
-            tmux.send_keys("t", config.win_id)
+            tmux.send_keys("t", win_id)
 
         elif cmd == "yes":
-            tmux.send_keys("y", config.win_id)
+            tmux.send_keys("y", win_id)
 
         elif cmd == "no":
-            tmux.send_keys("n", config.win_id)
+            tmux.send_keys("n", win_id)
 
         else:
             await update.message.reply_text(f"❌ 未知命令: /{cmd}", parse_mode='HTML')
@@ -335,26 +421,16 @@ async def handle_special_command(
 
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理语音消息"""
+    """处理语音消息 - STT 识别后发送到 tmux"""
     user_id = update.effective_user.id
-    chat_id = update.message.chat_id
     message_id = update.message.message_id
 
     logger.info(
         f"收到语音消息: user_id={user_id}, duration={update.message.voice.duration}s"
     )
 
-    # 创建队列消息（识别前）
-    queue_id = create_a_queue_file(
-        text="", user_id=user_id, chat_id=chat_id, message_id=message_id, is_text=False
-    )
-    logger.debug(f"创建队列消息: {queue_id}")
-
-    # 发送 ACK 消息（reply 到用户语音）
+    # 发送 ACK 消息
     ack_msg = await update.message.reply_text("🎧 识别中...", reply_to_message_id=message_id, parse_mode='HTML')
-
-    # 更新队列中的 ack_message_id
-    await update_a_queue_status(queue_id, "pending", int(ack_msg.message_id))
 
     try:
         # 下载语音文件
@@ -370,40 +446,104 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if not text:
             await ack_msg.edit_text("❌ 识别失败", parse_mode='HTML')
-            await update_a_queue_status(queue_id, "error")
             return
 
         logger.info(f"语音识别成功: text='{text}'")
 
         # 发送到 tmux，跟文字消息一样
         tmux = get_tmux_backend()
-        tmux.send_text(text, config.win_id)
-        import asyncio as _asyncio
-        await _asyncio.sleep(config.tmux_send_delay)
-        tmux.send_keys("ENTER", config.win_id)
-
-        # 记录活跃 chat_id
-        chat_id_file = os.path.join(DATA_DIR, "active_chat_id")
-        with open(chat_id_file, "w") as f:
-            f.write(str(update.message.chat_id))
+        tmux.send_msg(text, win_id)
 
         await ack_msg.edit_text(f"🎤 {text}", parse_mode='HTML')
 
-        # 存 ack message_id，回复到达后删除
-        ack_file = os.path.join(DATA_DIR, "ack_message_id")
-        with open(ack_file, "w") as f:
-            f.write(str(ack_msg.message_id))
+        # 记录 QA pair
+        try:
+            import pymysql as _pymysql
+            _conn = _pymysql.connect(
+                host='localhost', user='root',
+                password=os.getenv("MYSQL_PASSWORD", ""),
+                database='tts_bot', charset='utf8mb4', autocommit=True
+            )
+            _c = _conn.cursor()
+            _c.execute("""
+                INSERT INTO qa_pair (bot_name, chat_id, question, status)
+                VALUES (%s, %s, %s, 'pending')
+            """, (bot_name, update.message.chat_id, text))
+            _c.close()
+            _conn.close()
+        except Exception as e:
+            logger.warning(f"记录 QA pair 失败: {e}")
+
+        # 更新 session_map 中的 chat_id
+        from tts_bot.session_map import session_map
+        session_map.update_chat_id(win_id, update.message.chat_id)
 
     except Exception as e:
         logger.error(f"语音处理失败: {e}", exc_info=True)
         await ack_msg.edit_text("❌ 识别失败", parse_mode='HTML')
-        await update_a_queue_status(queue_id, "error")
 
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理按钮回调"""
     query = update.callback_query
     await query.answer()
+
+    # 取消 admin 面板
+    if query.data == "cancel_admin":
+        await query.message.delete()
+        try:
+            await context.bot.delete_message(
+                chat_id=query.message.chat_id,
+                message_id=query.message.message_id - 1
+            )
+        except:
+            pass
+        return
+    
+    # 取消 keys 面板
+    if query.data == "cancel_keys":
+        await query.message.delete()
+        try:
+            await context.bot.delete_message(
+                chat_id=query.message.chat_id,
+                message_id=query.message.message_id - 1
+            )
+        except:
+            pass
+        return
+
+    # 按键回调: key_{action}
+    if query.data.startswith("key_"):
+        action = query.data[4:]
+        
+        KEY_CMD_MAP = {
+            "up": "/up", "down": "/down", "left": "/left", "right": "/right",
+            "yes": "/yes", "no": "/no", "trust": "/trust",
+            "enter": "/enter", "esc": "/esc", "ctrlc": "/ctrlc",
+            "capture": "/capture",
+        }
+        
+        cmd = KEY_CMD_MAP.get(action)
+        if cmd:
+            fake_update = update
+            fake_update.message = query.message
+            fake_update.effective_user = query.from_user
+            
+            await handle_special_command(fake_update, context, cmd)
+            # 不修改消息，保持键盘可用
+        return
+
+    # 授权回调: auth_{y|n|t}_{win_id}
+    if query.data.startswith("auth_"):
+        parts = query.data.split("_", 2)  # auth, action, win_id
+        if len(parts) == 3:
+            action = parts[1]  # y / n / t
+            win_id = parts[2]
+            tmux = get_tmux_backend()
+            tmux.send_msg(action, win_id)
+            label = {"t": "✅ Trust", "y": "👍 Yes", "n": "❌ No"}.get(action, action)
+            await query.edit_message_text(f"{label} → 已发送到 {win_id}", parse_mode='HTML')
+            return
 
     if query.data.startswith("voice_"):
         voice_name = query.data[6:]
@@ -511,13 +651,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # 发送到 tmux
         tmux = get_tmux_backend()
-        import asyncio as _asyncio
-        tmux.send_text(text, "kimi:master")
-        await _asyncio.sleep(1.0)
-        tmux.send_keys("ENTER", "kimi:master")
-        tmux.send_text(text, config.win_id)
-        await _asyncio.sleep(config.tmux_send_delay)
-        tmux.send_keys("ENTER", config.win_id)
+        # TODO: 未来迭代支持多人聊天，动态发送到多个 session
+        tmux.send_msg(text, win_id)
 
         # 记录活跃 chat_id
         chat_id_file = os.path.join(DATA_DIR, "active_chat_id")
@@ -556,11 +691,51 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     """启动 bot"""
+    global win_id, bot_name, group, api_url  # 设置为全局变量供其他函数使用
+    
     parser = argparse.ArgumentParser(
         description="W3C TTS Bot - Telegram 文字转语音机器人"
     )
+    parser.add_argument("--bot-name", required=True, help="Bot 名称")
     parser.add_argument("--debug", action="store_true", help="启用调试模式")
     args = parser.parse_args()
+    
+    bot_name = args.bot_name
+    
+    # 从 MySQL 读取所有配置
+    import pymysql
+    try:
+        mysql_pass = os.getenv("MYSQL_PASSWORD", "")
+        conn = pymysql.connect(
+            host='localhost',
+            user='root',
+            password=mysql_pass,
+            database='tts_bot',
+            charset='utf8mb4'
+        )
+        c = conn.cursor()
+        c.execute("""
+            SELECT bot_token, tmux_session, tmux_window, group_name, api_url
+            FROM bot_config
+            WHERE bot_name=%s AND status='active'
+        """, (bot_name,))
+        row = c.fetchone()
+        c.close()
+        conn.close()
+        
+        if not row:
+            raise ValueError(f"Bot {bot_name} not found or disabled in MySQL")
+        
+        TOKEN = row[0]
+        tmux_session = row[1] or "worker"
+        tmux_window = row[2] or bot_name
+        group = row[3] or "worker"
+        api_url = row[4] or "http://localhost:15001"
+        # 动态生成 win_id
+        from tts_bot.session_map import format_win_id
+        win_id = format_win_id(tmux_session, tmux_window)
+    except Exception as e:
+        raise ValueError(f"Failed to get config from MySQL: {e}")
 
     log_level = logging.DEBUG if args.debug else logging.INFO
     log_format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
@@ -585,11 +760,14 @@ def main():
         level=log_level, handlers=[console_handler, file_handler, error_handler]
     )
 
+    # 隐藏 httpx 日志中的 token
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+
     logger.info("=" * 60)
     logger.info("🤖 Starting W3C TTS Bot...")
     logger.info(f"📝 Bot Username: @w3c_tts_bot")
     logger.info(f"🎙️ 支持语音: {', '.join(VOICES.keys())}")
-    logger.info(f"🔧 当前 win_id: {config.win_id}")
+    logger.info(f"🔧 当前 win_id: {win_id}")
     logger.info(f"🔧 最大截取行数: {config.capture_max_rows}")
     logger.info(f"🔧 调试模式: {'开启' if args.debug else '关闭'}")
     logger.info(f"📁 数据目录: {DATA_DIR}")
@@ -601,6 +779,9 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("voice", voice_command))
+    app.add_handler(CommandHandler("keys", keys_command))
+    app.add_handler(CommandHandler("admin", admin_command))
+    app.add_handler(CommandHandler("ttyd_token_refresh", ttyd_token_refresh_command))
     app.add_handler(CommandHandler("checklist", checklist_command))
     app.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message)
@@ -608,8 +789,9 @@ def main():
     app.add_handler(
         CommandHandler(
             [
-                "tree",
+                "tre",
                 "capture",
+                "map",
                 "left",
                 "right",
                 "up",
@@ -632,18 +814,21 @@ def main():
 
     logger.info("✅ Bot is running!")
 
-    # 注册 session map
+    # 使用从 MySQL 读取的配置
+    # win_id 作为局部变量使用
+
+    # worker 工作目录: master用~/projects, 其他用~/workers/<bot_name>
+    if bot_name == "cicy_master_xk_bot":
+        work_dir = os.path.expanduser("~/projects")
+    else:
+        work_dir = os.path.expanduser(f"~/workers/{bot_name}")
+    os.makedirs(work_dir, exist_ok=True)
+    config.work_dir = work_dir
+
+    # 注册到 session_map
     from tts_bot.session_map import session_map
-    bot_name = os.getenv("BOT_NAME", "kiro-bot")
-    tmux_session = os.getenv("TMUX_SESSION", "")
-    if tmux_session:
-        win_id = f"{tmux_session}:0"
-        config.set_win_id(win_id)
-    api_port = os.getenv("API_PORT", "15001")
-    api_url = f"http://localhost:{api_port}"
-    session_map.register(config.win_id, bot_name, api_url, bot_token=TOKEN)
-    logger.info(f"📡 BOT_NAME={bot_name}, win_id={config.win_id}")
-    logger.info(f"📡 Session Map: {config.win_id} → {bot_name} ({api_url})")
+    session_map.register(win_id, bot_name, api_url, bot_token=TOKEN, group=group)
+    logger.info(f"📡 BOT_NAME={bot_name}, group={group}, win_id={win_id}, work_dir={work_dir}")
 
     # 启动时检测外部服务
     import urllib.request
@@ -658,6 +843,23 @@ def main():
         except Exception:
             logger.warning(f"  ⚠️ {name} 不可用")
     logger.info("按 Ctrl+C 停止 bot")
+
+    # 设置 bot menu commands
+    async def post_init(application):
+        await application.bot.set_my_commands([
+            ("start", "启动 / 菜单"),
+            ("map", "Worker 地图"),
+            ("voice", "切换语音"),
+            ("capture", "截屏"),
+            ("tre", "目录结构"),
+            ("trust", "授权 Trust"),
+            ("yes", "授权 Yes"),
+            ("no", "授权 No"),
+            ("ctrlc", "Ctrl+C"),
+            ("esc", "ESC"),
+            ("enter", "Enter"),
+        ])
+    app.post_init = post_init
 
     try:
         app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)

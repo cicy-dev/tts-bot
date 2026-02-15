@@ -13,29 +13,19 @@ class TmuxBackend(ABC):
 
     @abstractmethod
     def send_text(self, text: str, win_id: str) -> bool:
-        """发送文本到 tmux
-
-        Args:
-            text: 要发送的文本
-            win_id: tmux 目标窗口 ID
-
-        Returns:
-            是否发送成功
-        """
+        """发送字面文本到 tmux（不含回车）"""
         pass
 
     @abstractmethod
     def send_keys(self, keys: str, win_id: str) -> bool:
-        """发送特殊按键到 tmux
-
-        Args:
-            keys: 按键名称 (LEFT, RIGHT, UP, DOWN, ENTER, etc.)
-            win_id: tmux 目标窗口 ID
-
-        Returns:
-            是否发送成功
-        """
+        """发送特殊按键到 tmux (ENTER, LEFT, CTRL+C, etc.)"""
         pass
+
+    def send_msg(self, text: str, win_id: str) -> bool:
+        """发送文本 + 回车到 tmux（通用方法）"""
+        if not self.send_text(text, win_id):
+            return False
+        return self.send_keys("ENTER", win_id)
 
     @abstractmethod
     def capture_pane(self, win_id: str, max_rows: Optional[int] = None) -> str:

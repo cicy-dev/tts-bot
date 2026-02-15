@@ -179,48 +179,67 @@ def conf_hash() -> str:
 
 
 def start_ttyd(bot_name: str, win_id: str, base_port: int = 16000):
-    """为 bot 启动 ttyd 实例（带 token 认证）"""
-    import secrets, json, hashlib
-    # 使用 bot_name 的 md5 生成稳定的端口
-    port = base_port + (int(hashlib.md5(bot_name.encode()).hexdigest()[:4], 16) % 1000)
-    
-    # 生成随机 token
+    """为 bot 启动 ttyd 实例（带 token 认证）
+    端口固定分配：
+      master  → 16000
+      auth    → 16001
+      worker  → 16002
+    """
+    import secrets, json, pymysql, requests
+
+    # 固定端口映射（按 group 顺序）
+    FIXED_PORTS = {
+        "cicy_master_xk_bot": 16000,
+        "cicy_test_final_bot": 16001,
+        "cicy_test_auto_bot": 16002,
+    }
+    port = FIXED_PORTS.get(bot_name)
+    if port is None:
+        # 未知 bot，从 16010 开始按 bot_config.id 分配
+        try:
+            mysql_pass = os.getenv("MYSQL_PASSWORD", "")
+            conn = pymysql.connect(host='localhost', user='root', password=mysql_pass, database='tts_bot', autocommit=True)
+            c = conn.cursor()
+            c.execute("SELECT id FROM bot_config WHERE bot_name=%s", (bot_name,))
+            row = c.fetchone()
+            conn.close()
+            port = 16010 + (row[0] if row else 0)
+        except:
+            port = base_port + 99
+
+    # 先杀掉占用该端口的旧 ttyd
+    subprocess.run(["fuser", "-k", f"{port}/tcp"], capture_output=True)
+    import time
+    time.sleep(0.5)
+
+    # 生成随机 token 作为密码
     token = secrets.token_urlsafe(16)
-    
-    # 启动原版 ttyd (使用 -t 参数支持 URL token)
+
+    # 启动 ttyd（只读模式）
     proc = subprocess.Popen(
-        ["ttyd", "-p", str(port), "-t", f"credential={token}", "-R", "tmux", "-S", TMUX_SOCKET, "attach-session", "-t", win_id],
+        ["ttyd", "-p", str(port), "-c", f"bot:{token}", "-R",
+         "tmux", "-S", TMUX_SOCKET, "attach-session", "-t", win_id],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
     logger.info(f"✅ 启动 ttyd: {bot_name} (port={port}, win_id={win_id}, pid={proc.pid})")
-    
+
     # 保存到 bot_config 表
     try:
-        import pymysql, requests
-        # 获取公网 IP
-        try:
-            public_ip = requests.get("https://api.ipify.org", timeout=3).text.strip()
-        except:
-            public_ip = "localhost"
-        
-        url = f"http://{public_ip}:{port}/?token={token}"
-        
         mysql_pass = os.getenv("MYSQL_PASSWORD", "")
         conn = pymysql.connect(host='localhost', user='root', password=mysql_pass, database='tts_bot', autocommit=True)
         c = conn.cursor()
-        # 更新 bot_config 表
         c.execute("""
-            UPDATE bot_config 
-            SET ttyd_port=%s, ttyd_token=%s, ttyd_url=%s 
+            UPDATE bot_config
+            SET ttyd_port=%s, ttyd_token=%s
             WHERE bot_name=%s
-        """, (port, token, url, bot_name))
+        """, (port, token, bot_name))
         c.close()
         conn.close()
-        logger.info(f"✅ 保存 ttyd 到 bot_config: {url}")
+        logger.info(f"✅ 保存 ttyd: {bot_name} port={port}")
     except Exception as e:
         logger.error(f"❌ 保存 ttyd 信息失败: {e}")
-    
+
     return proc, port
 
 
@@ -275,11 +294,11 @@ def start_api():
 def start_handler():
     global handler_proc
     proc = subprocess.Popen(
-        [sys.executable, "-u", "scripts/kiro_handler.py"],
-        stdout=open("/tmp/handler.log", "a"),
+        [sys.executable, "-u", "scripts/qa_matcher.py"],
+        stdout=open("/tmp/qa_matcher.log", "a"),
         stderr=subprocess.STDOUT,
     )
-    logger.info(f"✅ 启动 Handler (pid={proc.pid})")
+    logger.info(f"✅ 启动 QA Matcher (pid={proc.pid})")
     handler_proc = proc
 
 

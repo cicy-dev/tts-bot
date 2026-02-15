@@ -19,7 +19,6 @@ app = FastAPI()
 
 # 加载 tts_bot 包
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-from tts_bot.redis_queue import rq
 
 # 允许跨域
 app.add_middleware(
@@ -36,26 +35,20 @@ DATA_DIR = os.path.expanduser("~/data/tts-tg-bot")
 TOKEN_FILE = os.path.join(DATA_DIR, 'token.txt')
 
 # 读取 bot token（优先环境变量）
-BOT_TOKEN = os.getenv('BOT_TOKEN')
-if not BOT_TOKEN and os.path.exists(TOKEN_FILE):
-    with open(TOKEN_FILE, 'r') as f:
-        BOT_TOKEN = f.read().strip()
-if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN not found! Set BOT_TOKEN env or create token.txt")
-
-bot = Bot(token=BOT_TOKEN)
+BOT_TOKEN = os.getenv('BOT_TOKEN', '')
+bot = Bot(token=BOT_TOKEN) if BOT_TOKEN else None
 
 # Bot 实例缓存 {bot_name: Bot}
 _bot_cache: dict[str, Bot] = {}
 
 
 def get_bot_by_name(bot_name: str) -> Bot:
-    """根据 bot_name 从 Redis session_map 获取对应 bot，默认返回当前 bot"""
+    """根据 bot_name 获取对应 bot（MySQL bot_config → 默认）"""
     if not bot_name:
         return bot
     if bot_name in _bot_cache:
         return _bot_cache[bot_name]
-    # 尝试从 Redis 获取 bot token
+    # 从 MySQL bot_config 获取 bot token
     try:
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
         from tts_bot.session_map import session_map
@@ -83,22 +76,27 @@ class Reply(BaseModel):
 @app.get('/health')
 def health():
     """健康检查"""
-    return {'status': 'ok', 'redis': rq.ping()}
+    import pymysql
+    try:
+        mysql_pass = os.getenv("MYSQL_PASSWORD", "")
+        conn = pymysql.connect(host='localhost', user='root', password=mysql_pass, database='tts_bot')
+        conn.close()
+        return {'status': 'ok', 'mysql': True}
+    except:
+        return {'status': 'ok', 'mysql': False}
 
 @app.get('/messages')
 def get_messages():
-    """获取待处理的消息（从 Redis）"""
+    """获取待处理的消息（从 MySQL qa_pair）"""
     try:
-        pending = rq.client.lrange("tts:queue:pending", 0, -1)
-        messages = []
-        for msg_id in pending:
-            data = rq.get(msg_id)
-            if data and data.get('status') == 'pending':
-                messages.append({
-                    'id': msg_id,
-                    'text': data.get('text', ''),
-                    'timestamp': data.get('created_at', ''),
-                })
+        import pymysql
+        mysql_pass = os.getenv("MYSQL_PASSWORD", "")
+        conn = pymysql.connect(host='localhost', user='root', password=mysql_pass, database='tts_bot', charset='utf8mb4')
+        c = conn.cursor()
+        c.execute("SELECT id, question, status, created_at FROM qa_pair WHERE status='pending' ORDER BY created_at ASC LIMIT 20")
+        messages = [{'id': r[0], 'text': r[1], 'status': r[2], 'timestamp': str(r[3])} for r in c.fetchall()]
+        c.close()
+        conn.close()
         return {'messages': messages}
     except Exception as e:
         return {'messages': [], 'error': str(e)}
@@ -293,6 +291,21 @@ async def api_get_voice():
     return {'voice': get_tts_voice()}
 
 
+@app.post('/typing')
+async def post_typing(data: dict):
+    """发送 typing 状态"""
+    bot_name = data.get("bot_name", "")
+    chat_id = data.get("chat_id", 0)
+    if not chat_id:
+        return {"success": False, "message": "no chat_id"}
+    send_bot = get_bot_by_name(bot_name)
+    try:
+        await send_bot.send_chat_action(chat_id=chat_id, action="typing")
+        return {"success": True}
+    except Exception as e:
+        return {"success": False, "message": str(e)}
+
+
 @app.post('/reply')
 async def post_reply(reply: Reply):
     """提交回复：根据 bot_name 找到对应 bot 发送"""
@@ -301,11 +314,15 @@ async def post_reply(reply: Reply):
     # 根据 bot_name 获取对应的 bot 实例
     send_bot = get_bot_by_name(reply.bot_name)
 
+    import sys; sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+    from tts_bot.session_map import session_map
+    TTS_ENABLED = session_map.get_var("tts_enabled", "0") == "1"
+
     try:
         summary, detail = split_reply(reply.reply)
 
-        if detail:
-            await send_bot.send_message(chat_id=reply.chat_id, text=md_to_tg_html(reply.reply), parse_mode='HTML')
+        if detail or not TTS_ENABLED:
+            await send_bot.send_message(chat_id=reply.chat_id, text=md_to_tg_html(reply.reply if detail else summary), parse_mode='HTML')
         else:
             # 短回复：语音 + caption
             try:
@@ -340,6 +357,59 @@ async def post_reply(reply: Reply):
     except Exception as e:
         print(f"发送失败: {e}", flush=True)
         return {'success': False, 'error': str(e)}
+
+class AuthRequest(BaseModel):
+    chat_id: int = 0
+    bot_name: str = ""
+    win_id: str = ""
+    context: str = ""
+    auth_bot: str = ""
+
+
+@app.post('/auth_request')
+async def post_auth_request(req: AuthRequest):
+    """handler 上报 [y/n/t]，发送 inline keyboard 给用户决策"""
+    send_bot = get_bot_by_name(req.bot_name)
+    try:
+        ctx_lines = req.context.strip().split("\n")[-5:]
+        ctx_short = "\n".join(ctx_lines)
+
+        text = f"🔐 <b>{req.bot_name}</b> 请求授权\n<pre>{ctx_short}</pre>"
+        buttons = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("✅ Trust", callback_data=f"auth_t_{req.win_id}"),
+                InlineKeyboardButton("👍 Yes", callback_data=f"auth_y_{req.win_id}"),
+                InlineKeyboardButton("❌ No", callback_data=f"auth_n_{req.win_id}"),
+            ]
+        ])
+        await send_bot.send_message(
+            chat_id=req.chat_id, text=text,
+            reply_markup=buttons, parse_mode='HTML'
+        )
+        return {'success': True}
+    except Exception as e:
+        print(f"授权请求发送失败: {e}", flush=True)
+        return {'success': False, 'error': str(e)}
+
+
+@app.post('/auth_log')
+async def post_auth_log(req: AuthRequest):
+    """auth bot 记录授权事件（handler 已自动发 t）"""
+    try:
+        auth_bot_obj = get_bot_by_name(req.auth_bot)
+        chat_id = req.chat_id or int(os.getenv("CHAT_ID", "0"))
+        if not chat_id:
+            return {'success': False, 'error': 'no chat_id for auth bot'}
+
+        ctx_lines = req.context.strip().split("\n")[-3:]
+        ctx_short = "\n".join(ctx_lines)
+        text = f"🔓 自动授权 <b>t</b>\n📍 {req.bot_name} → {req.win_id}\n<pre>{ctx_short}</pre>"
+        await auth_bot_obj.send_message(chat_id=chat_id, text=text, parse_mode='HTML')
+        return {'success': True}
+    except Exception as e:
+        print(f"auth_log 发送失败: {e}", flush=True)
+        return {'success': False, 'error': str(e)}
+
 
 @app.get('/callback/{callback_data}')
 async def handle_callback(callback_data: str):

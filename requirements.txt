@@ -8,3 +8,6 @@ uvicorn
 python-multipart
 redis
 watchdog
+websockets
+pymysql
+requests

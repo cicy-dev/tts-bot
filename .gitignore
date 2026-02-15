@@ -8,3 +8,4 @@ __pycache__/
 .htpasswd
 bots.conf
 node_modules/
+.env

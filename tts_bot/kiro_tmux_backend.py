@@ -28,9 +28,9 @@ class KiroTmuxBackend(TmuxBackend):
     """Kiro tmux 后端实现"""
 
     def send_text(self, text: str, win_id: str) -> bool:
-        """发送文本到 tmux"""
+        """发送文本到 tmux（用 -l 发送字面文本）"""
         escaped = text.replace("'", "'\\''")
-        cmd = f"{TMUX_PREFIX} send-keys -t '{win_id}' '{escaped}'"
+        cmd = f"{TMUX_PREFIX} send-keys -t '{win_id}' -l '{escaped}'"
         output, code = run_cmd(cmd)
         return code == 0
 
@@ -50,12 +50,18 @@ class KiroTmuxBackend(TmuxBackend):
         output, code = run_cmd(cmd)
         return code == 0
 
+    def send_msg(self, text: str, win_id: str) -> bool:
+        """发送文本 + 回车到 tmux（通用方法）"""
+        if not self.send_text(text, win_id):
+            return False
+        return self.send_keys("ENTER", win_id)
+
     def capture_pane(self, win_id: str, max_rows: Optional[int] = None) -> str:
         """捕获 tmux pane 内容"""
         if max_rows is None:
             max_rows = config.capture_max_rows
 
-        cmd = f"{TMUX_PREFIX} capture-pane -t '{win_id}' -p"
+        cmd = f"{TMUX_PREFIX} capture-pane -t '{win_id}' -p -S -{max_rows or 500}"
         output, code = run_cmd(cmd)
 
         if code != 0:
@@ -138,7 +144,7 @@ class KiroTmuxBackend(TmuxBackend):
                     is_last_pane = k == len(panes) - 1
                     pane_prefix = "└──" if is_last_pane else "├──"
                     pane_indent = "    " if is_last_win else "│   "
-                    pane_id = f"{session}:{win_idx}.{pane_idx}"
+                    pane_id = f"{session}:{win_name}.{pane_idx}"
                     lines.append(
                         f"{indent}{pane_indent}{pane_prefix} {pane_id}"
                     )
