@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Bot Supervisor - 根据 bots.conf 动态管理多个 bot 进程
-只需传 token，自动获取 bot name，自动创建 tmux session
+Bot Supervisor - 从 MySQL 动态管理多个 bot 进程
+自动读取 bot_tokens 表，启动所有 bot
 """
 
 import os
@@ -20,12 +20,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-CONF_PATH = os.getenv("BOTS_CONF", "/app/bots.conf")
 POLL_INTERVAL = 5
 API_PORT_BASE = 15001
 TMUX_SOCKET = os.getenv("TMUX_SOCKET", f"/tmp/tmux-{os.getuid()}/default")
 
-# {token_hash: {"proc", "token", "bot_name", "session", "port"}}
+# {token_hash: {"proc", "ttyd_proc", "ttyd_port", "token", "bot_name", "session", "port"}}
 bots: dict[str, dict] = {}
 handler_proc = None
 api_proc = None
@@ -86,7 +85,7 @@ def ensure_tmux_window(group: str, bot_name: str, workspace: str = "") -> str:
             )
         created = True
         logger.info(f"📺 创建 window: {group}:{bot_name}")
-    win_id = f"{group}:{bot_name}"
+    win_id = f"{group}:{bot_name}.0"  # 完整格式: session:window.pane
     # 只在新建 window 时才发送 init 命令
     if created:
         wd = workspace or f"~/workers/{bot_name}"
@@ -119,61 +118,145 @@ def start_router():
 
 
 def parse_conf() -> list[dict] | None:
-    """解析 bots.conf — bot_name,group[,workspace] 格式"""
-    if not os.path.exists(CONF_PATH):
+    """从 MySQL bot_config 读取 bot 列表（只读取 status='active' 的）"""
+    try:
+        import pymysql
+        mysql_pass = os.getenv("MYSQL_PASSWORD", "")
+        conn = pymysql.connect(
+            host='localhost',
+            user='root',
+            password=mysql_pass,
+            database='tts_bot',
+            charset='utf8mb4'
+        )
+        c = conn.cursor()
+        c.execute("SELECT bot_name, bot_token, group_name, workspace FROM bot_config WHERE status='active'")
+        rows = c.fetchall()
+        c.close()
+        conn.close()
+        
+        if not rows:
+            return None
+            
+        entries = []
+        for bot_name, token, group, workspace in rows:
+            entries.append({
+                "bot_name": bot_name,
+                "token": token,
+                "group": group or "worker",
+                "workspace": workspace or ""
+            })
+        
+        return entries if entries else None
+    except Exception as e:
+        logger.error(f"❌ 从 MySQL 读取 bot 列表失败: {e}")
         return None
-    entries = []
-    with open(CONF_PATH) as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            parts = [p.strip() for p in line.split(",")]
-            bot_name = parts[0]
-            group = parts[1] if len(parts) > 1 and parts[1] else "worker"
-            workspace = parts[2] if len(parts) > 2 and parts[2] else ""
-            if not bot_name:
-                continue
-            entries.append({"bot_name": bot_name, "group": group, "workspace": workspace})
-    return entries if entries else None
 
 
 def conf_hash() -> str:
-    if not os.path.exists(CONF_PATH):
+    """计算 MySQL bot_config 表的 hash"""
+    try:
+        import pymysql
+        mysql_pass = os.getenv("MYSQL_PASSWORD", "")
+        conn = pymysql.connect(
+            host='localhost',
+            user='root',
+            password=mysql_pass,
+            database='tts_bot',
+            charset='utf8mb4'
+        )
+        c = conn.cursor()
+        c.execute("SELECT bot_name, bot_token, status FROM bot_config ORDER BY bot_name")
+        rows = c.fetchall()
+        c.close()
+        conn.close()
+        
+        content = "\n".join(f"{name},{token},{status}" for name, token, status in rows)
+        return hashlib.md5(content.encode()).hexdigest()
+    except Exception as e:
+        logger.error(f"❌ 计算 hash 失败: {e}")
         return ""
-    with open(CONF_PATH, "rb") as f:
-        return hashlib.md5(f.read()).hexdigest()
+
+
+def start_ttyd(bot_name: str, win_id: str, base_port: int = 16000):
+    """为 bot 启动 ttyd 实例（带 token 认证）"""
+    import secrets, json, hashlib
+    # 使用 bot_name 的 md5 生成稳定的端口
+    port = base_port + (int(hashlib.md5(bot_name.encode()).hexdigest()[:4], 16) % 1000)
+    
+    # 生成随机 token
+    token = secrets.token_urlsafe(16)
+    
+    # 启动原版 ttyd (使用 -t 参数支持 URL token)
+    proc = subprocess.Popen(
+        ["ttyd", "-p", str(port), "-t", f"credential={token}", "-R", "tmux", "-S", TMUX_SOCKET, "attach-session", "-t", win_id],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    logger.info(f"✅ 启动 ttyd: {bot_name} (port={port}, win_id={win_id}, pid={proc.pid})")
+    
+    # 保存到 bot_config 表
+    try:
+        import pymysql, requests
+        # 获取公网 IP
+        try:
+            public_ip = requests.get("https://api.ipify.org", timeout=3).text.strip()
+        except:
+            public_ip = "localhost"
+        
+        url = f"http://{public_ip}:{port}/?token={token}"
+        
+        mysql_pass = os.getenv("MYSQL_PASSWORD", "")
+        conn = pymysql.connect(host='localhost', user='root', password=mysql_pass, database='tts_bot', autocommit=True)
+        c = conn.cursor()
+        # 更新 bot_config 表
+        c.execute("""
+            UPDATE bot_config 
+            SET ttyd_port=%s, ttyd_token=%s, ttyd_url=%s 
+            WHERE bot_name=%s
+        """, (port, token, url, bot_name))
+        c.close()
+        conn.close()
+        logger.info(f"✅ 保存 ttyd 到 bot_config: {url}")
+    except Exception as e:
+        logger.error(f"❌ 保存 ttyd 信息失败: {e}")
+    
+    return proc, port
 
 
 def start_bot(token: str, bot_name: str, group: str, win_id: str, port: int):
     """启动一个 bot 进程"""
-    env = os.environ.copy()
-    env["BOT_TOKEN"] = token
-    env["BOT_NAME"] = bot_name
-    env["TMUX_SESSION"] = group
-    env["TMUX_WIN_ID"] = win_id
-    env["API_PORT"] = str(port)
-
     proc = subprocess.Popen(
-        [sys.executable, "-m", "tts_bot.bot"],
-        env=env,
+        [sys.executable, "-m", "tts_bot.bot", "--bot-name", bot_name],
         stdout=open(f"/tmp/bot_{bot_name}.log", "w"),
         stderr=subprocess.STDOUT,
     )
     logger.info(f"✅ 启动 bot: {bot_name} (group={group}, win_id={win_id}, port={port}, pid={proc.pid})")
-    return proc
+    
+    # 启动对应的 ttyd
+    ttyd_proc, ttyd_port = start_ttyd(bot_name, win_id)
+    
+    return proc, ttyd_proc, ttyd_port
 
 
 def stop_bot(key: str):
-    """停止一个 bot"""
+    """停止一个 bot 和对应的 ttyd"""
     if key in bots:
         info = bots[key]
+        # 停止 bot 进程
         if info["proc"].poll() is None:
             info["proc"].terminate()
             try:
                 info["proc"].wait(timeout=5)
             except subprocess.TimeoutExpired:
                 info["proc"].kill()
+        # 停止 ttyd 进程
+        if "ttyd_proc" in info and info["ttyd_proc"].poll() is None:
+            info["ttyd_proc"].terminate()
+            try:
+                info["ttyd_proc"].wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                info["ttyd_proc"].kill()
         logger.info(f"❌ 停止 bot: {info['bot_name']}")
         del bots[key]
 
@@ -193,7 +276,7 @@ def start_handler():
     global handler_proc
     proc = subprocess.Popen(
         [sys.executable, "-u", "scripts/kiro_handler.py"],
-        stdout=open("/tmp/handler.log", "w"),
+        stdout=open("/tmp/handler.log", "a"),
         stderr=subprocess.STDOUT,
     )
     logger.info(f"✅ 启动 Handler (pid={proc.pid})")
@@ -202,8 +285,6 @@ def start_handler():
 
 def sync_bots():
     """同步配置和运行中的 bot"""
-    from token_manager import ensure_token
-
     entries = parse_conf()
 
     # 配置不存在或为空 → 保持现状，只守护
@@ -211,30 +292,49 @@ def sync_bots():
         for key, info in list(bots.items()):
             if info["proc"].poll() is not None:
                 logger.warning(f"⚠️ {info['bot_name']} 崩溃，重启...")
-                info["proc"] = start_bot(info["token"], info["bot_name"], info["session"], info["port"])
+                proc, ttyd_proc, ttyd_port = start_bot(info["token"], info["bot_name"], info["group"], info["win_id"], info["port"])
+                info["proc"] = proc
+                info["ttyd_proc"] = ttyd_proc
+                info["ttyd_port"] = ttyd_port
         return
 
     conf_keys = set()
 
     for entry in entries:
         bot_name = entry["bot_name"]
+        token = entry["token"]
         group = entry["group"]
         workspace = entry.get("workspace", "")
         key = bot_name
 
         conf_keys.add(key)
 
+        # 新增的 bot
         if key not in bots:
-            token = ensure_token(bot_name)
-            if not token:
-                logger.error(f"❌ {bot_name}: 无法获取 token，跳过")
-                continue
-
             win_id = ensure_tmux_window(group, bot_name, workspace)
             port = int(os.environ.get("API_PORT", 15001))
-            proc = start_bot(token, bot_name, group, win_id, port)
+            proc, ttyd_proc, ttyd_port = start_bot(token, bot_name, group, win_id, port)
             bots[key] = {
                 "proc": proc,
+                "ttyd_proc": ttyd_proc,
+                "ttyd_port": ttyd_port,
+                "token": token,
+                "bot_name": bot_name,
+                "group": group,
+                "win_id": win_id,
+                "port": port,
+            }
+        # token 变化的 bot - 只重启这个
+        elif bots[key]["token"] != token:
+            logger.info(f"🔄 {bot_name} token 变化，重启...")
+            stop_bot(key)
+            win_id = ensure_tmux_window(group, bot_name, workspace)
+            port = int(os.environ.get("API_PORT", 15001))
+            proc, ttyd_proc, ttyd_port = start_bot(token, bot_name, group, win_id, port)
+            bots[key] = {
+                "proc": proc,
+                "ttyd_proc": ttyd_proc,
+                "ttyd_port": ttyd_port,
                 "token": token,
                 "bot_name": bot_name,
                 "group": group,
@@ -250,7 +350,10 @@ def sync_bots():
     for key, info in list(bots.items()):
         if info["proc"].poll() is not None:
             logger.warning(f"⚠️ {info['bot_name']} 崩溃，重启...")
-            info["proc"] = start_bot(info["token"], info["bot_name"], info["session"], info["port"])
+            proc, ttyd_proc, ttyd_port = start_bot(info["token"], info["bot_name"], info["group"], info["win_id"], info["port"])
+            info["proc"] = proc
+            info["ttyd_proc"] = ttyd_proc
+            info["ttyd_port"] = ttyd_port
 
 
 def cleanup(signum, frame):
@@ -272,10 +375,19 @@ def main():
 
     logger.info("=" * 50)
     logger.info("🚀 Bot Supervisor 启动")
-    logger.info(f"📋 配置: {CONF_PATH}")
+    logger.info(f"📋 数据源: MySQL bot_config 表")
     logger.info("=" * 50)
 
     start_api()
+
+    # 等待 MySQL 有数据
+    while True:
+        entries = parse_conf()
+        if entries:
+            logger.info(f"✅ 发现 {len(entries)} 个 bot 配置")
+            break
+        logger.info("⏳ 等待 MySQL bot_tokens 表有数据...")
+        time.sleep(5)
 
     # 先启动 bot（注册 session_map），再启动 handler
     last_hash = conf_hash()
@@ -291,7 +403,7 @@ def main():
     while True:
         current_hash = conf_hash()
         if current_hash != last_hash:
-            logger.info("📋 配置变化，同步中...")
+            logger.info("📋 MySQL 配置变化，重新加载...")
             sync_bots()
             last_hash = current_hash
 

@@ -19,9 +19,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [router] %(message)s
 logger = logging.getLogger(__name__)
 
 TMUX_SOCKET = os.getenv("TMUX_SOCKET", f"/tmp/tmux-{os.getuid()}/default")
-AUTH_TOKEN = os.getenv("ROUTER_TOKEN", "pb200898")
+AUTH_TOKEN = os.getenv("ROUTER_TOKEN", "")
 PORT = int(os.getenv("ROUTER_PORT", "12345"))
-TTYD_BASE_PORT = 17000
+TTYD_BASE_PORT = 16000
 NGINX_CONF = "/tmp/nginx_dynamic.conf"
 NGINX_PID = "/tmp/nginx.pid"
 
