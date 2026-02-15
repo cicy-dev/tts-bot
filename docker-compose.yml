@@ -1,36 +1,67 @@
+x-common: &common
+  build: .
+  privileged: true
+  network_mode: host
+  pid: host
+  environment: &env
+    - DATA_DIR=/root/projects/tts-bot/data
+    - TMUX_SOCKET=/tmp/tmux-1001/default
+    - OWNER_ID=7943234085
+    - GEMINI_API_KEY=AIzaSyC5EqHvfu0SJOKrvkPz8vH3E7iFr9ZW1c8
+    - MYSQL_HOST=localhost
+    - MYSQL_USER=root
+    - MYSQL_PASSWORD=${MYSQL_PASSWORD}
+    - ROUTER_TOKEN=${ROUTER_TOKEN}
+    - MYSQL_DATABASE=tts_bot
+  volumes: &vols
+    - /tmp/tmux-1001:/tmp/tmux-1001
+    - ~/.kiro:/root/.kiro
+    - ~/personal:/root/personal
+    - ~/workers:/root/workers
+    - ~/projects:/root/projects
+  restart: unless-stopped
+  logging:
+    driver: "json-file"
+    options:
+      max-size: "10m"
+      max-file: "3"
+
 services:
+  # 后台服务：API + QA Matcher + ttyd Collector
   tts-bot:
-    build: .
+    <<: *common
     container_name: tts-bot
-    privileged: true
-    network_mode: host
-    pid: host
-    environment:
-      - DATA_DIR=/root/projects/tts-bot/data
-      - REDIS_URL=redis://localhost:6379/0
-      - TMUX_SOCKET=/tmp/tmux-1001/default
-      - OWNER_ID=7943234085
-      - GEMINI_API_KEY=AIzaSyC5EqHvfu0SJOKrvkPz8vH3E7iFr9ZW1c8
-      - MYSQL_HOST=localhost
-      - MYSQL_USER=root
-      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
-      - ROUTER_TOKEN=${ROUTER_TOKEN}
-      - MYSQL_DATABASE=tts_bot
-    volumes:
-      - /tmp/tmux-1001:/tmp/tmux-1001
-      - ~/.kiro:/root/.kiro
-      - ~/personal:/root/personal
-      - ~/workers:/root/workers
-      - ~/projects:/root/projects
-    restart: unless-stopped
+    command: ["bash", "docker-start.sh"]
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:15001/health"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 10s
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
+
+  # Master Bot
+  bot-master:
+    <<: *common
+    container_name: bot-master
+    command: ["python3", "-m", "tts_bot.bot", "--bot-name", "cicy_master_xk_bot"]
+    depends_on:
+      tts-bot:
+        condition: service_healthy
+
+  # Auth Bot
+  bot-auth:
+    <<: *common
+    container_name: bot-auth
+    command: ["python3", "-m", "tts_bot.bot", "--bot-name", "cicy_test_final_bot"]
+    depends_on:
+      tts-bot:
+        condition: service_healthy
+
+  # Worker Bot
+  bot-worker:
+    <<: *common
+    container_name: bot-worker
+    command: ["python3", "-m", "tts_bot.bot", "--bot-name", "cicy_test_auto_bot"]
+    depends_on:
+      tts-bot:
+        condition: service_healthy
